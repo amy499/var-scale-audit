@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "var-scale-audit"
+version = "0.1.0"
+description = "Shared generation runner for VAR and DiT"
+requires-python = ">=3.10,<3.11"
+# Dependencies live in environment.yml (single source of truth); not duplicated here.
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["runner*"]

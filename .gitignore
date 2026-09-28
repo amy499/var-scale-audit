@@ -1,0 +1,19 @@
+# Large artifacts: model weights and generated samples
+checkpoints/
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+
+# Environments / tooling
+.venv/
+.env
+.omc/
+.idea/
+.vscode/

@@ -1,0 +1,37 @@
+# Single environment for both third_party/VAR and third_party/DiT.
+#
+#   conda env create -f environment.yml
+#   conda activate var-dit
+#
+# Pins are chosen to satisfy both upstream specs at the same time:
+#   VAR requirements.txt : torch~=2.1.0, Pillow, huggingface_hub, numpy, pytz,
+#                          transformers, typed-argument-parser
+#   DiT environment.yml  : python>=3.8, pytorch>=1.13, torchvision,
+#                          pytorch-cuda=11.7, timm, diffusers, accelerate
+# See README.md ("Environment") for the conflicts and how they were resolved.
+name: var-dit
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch=2.1.2          # VAR: ~=2.1.0 ; DiT: >=1.13
+  - torchvision=0.16.2     # matches torch 2.1.2
+  - pytorch-cuda=11.8      # DiT asked for 11.7, which has no torch 2.1 build
+  - numpy>=1.24,<2         # torch 2.1 wheels are built against NumPy 1.x
+  - pillow
+  - tqdm
+  - pip
+  - pip:
+      # --- VAR ---
+      - huggingface_hub==0.23.5
+      - transformers==4.40.2        # listed by VAR but never imported; pinned to stay torch-2.1 compatible
+      - typed-argument-parser==1.10.1
+      - pytz
+      # --- DiT ---
+      - timm==0.9.16                # DiT imports PatchEmbed/Attention/Mlp from timm.models.vision_transformer
+      - diffusers==0.27.2           # AutoencoderKL (sd-vae-ft-*)
+      - accelerate==0.30.1          # listed by DiT but never imported
+      # --- this project ---
+      - -e .
