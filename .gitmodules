@@ -1,0 +1,6 @@
+[submodule "third_party/VAR"]
+	path = third_party/VAR
+	url = https://github.com/FoundationVision/VAR.git
+[submodule "third_party/DiT"]
+	path = third_party/DiT
+	url = https://github.com/facebookresearch/DiT.git
