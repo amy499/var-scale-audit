@@ -36,9 +36,11 @@ OUT="outputs/phase1_check/$JOB"
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/job.log") 2>&1
 
+set +u
 module load miniforge3
 eval "$(conda shell.bash hook)"
 conda activate var-dit
+set -u
 export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
 
 : > "$OUT/steps.tsv"
