@@ -57,6 +57,18 @@ One process loads exactly one model (`runner/upstream.py` refuses to mix repos).
 `outputs/<config>/class<c>_seed<s>.png` plus a `.json` with the settings, attention backend, precision,
 versions and submodule SHAs. All sampler settings come from the config; missing keys are an error.
 
+A manifest (CSV `class_id,seed`, one row per image; read only by `runner/manifest.py`) generates many images:
+
+```bash
+python -m runner.generate --config configs/var_d20.yaml --manifest manifest/provisional_4x4.csv --batch-size 16
+```
+
+Output: `outputs/<config>/<manifest>/class<c>_seed<s>.{png,pt}` plus `run.json` (settings and each row's
+tensor sha256). Every row gets its own generator seeded with its own seed, so its random draws do not
+depend on batch size or the other rows. Results are bit-identical across repeat runs at the same batch
+size; across batch sizes they can differ by float rounding (~1e-5 on CPU; see
+`scripts/phase2/check_seeding.py`). Use one batch size for a whole experiment.
+
 ## Pinned upstream commits
 
 | Submodule | Commit | Date |

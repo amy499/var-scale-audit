@@ -1,25 +1,36 @@
 """VAR wrapper: builds, loads and samples via unmodified third_party/VAR code."""
 
+import contextlib
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from runner import upstream
 from runner.config import ConfigError, resolve_path
-from runner.runtime import autocast_ctx, sdpa_ctx, sdpa_record
+from runner.runtime import autocast_ctx, row_generators, sdpa_ctx, sdpa_record
 
 _FORCED_BUILD_KWARGS = ("flash_if_available", "fused_if_available")
 
 
 class VARModel:
     name = "var"
+    # Every function autoregressive_infer_cfg passes its rng to (models/var.py).
+    _SAMPLING_HELPERS = ("sample_with_top_k_top_p_", "gumbel_softmax_with_rng")
 
     def __init__(self, cfg: dict):
         upstream.activate("var")
         import dist as var_dist
         import models
         from models import basic_var, build_vae_var
+        from models import helpers as var_helpers
+        from models import var as var_module
         upstream.check_origin(models, "var")
+        # The helpers _per_row_rng swaps must be the ones var.py imported from helpers.py.
+        for name in self._SAMPLING_HELPERS:
+            if getattr(var_module, name) is not getattr(var_helpers, name):
+                raise RuntimeError(f"models.var.{name} is not models.helpers.{name}; upstream changed")
+        self._var_module = var_module
 
         self.cfg = cfg
         self.device = torch.device(cfg["device"])
@@ -64,19 +75,54 @@ class VARModel:
             raise RuntimeError(f"VAR is not using torch SDPA only: {rec}")
         return rec
 
-    def sample(self, class_ids: list[int], seed: int):
-        """One batch (one seed for the whole batch).
+    @contextlib.contextmanager
+    def _per_row_rng(self, gens: list[torch.Generator]):
+        """Make each image's token sampling use only its own generator.
+
+        Upstream autoregressive_infer_cfg seeds one generator (self.rng, via g_seed) and samples
+        all B*l tokens of a scale in one torch.multinomial call, so a row's draws depend on B and
+        on the rows before it. While this is active, the two sampling helpers that models/var.py
+        imported are replaced (in that module's namespace only; no file changes) by wrappers that
+        call the unmodified helper once per row with that row's generator. At B=1 this is the
+        same call upstream makes with g_seed=seed. The transformer forward stays batched.
+        """
+        mod = self._var_module
+        originals = {name: getattr(mod, name) for name in self._SAMPLING_HELPERS}
+
+        def per_row(fn):
+            def wrapped(logits_BlV, *args, rng=None, **kwargs):
+                if rng is not None:
+                    raise RuntimeError("upstream passed its shared rng; call with g_seed=None")
+                if logits_BlV.shape[0] != len(gens):
+                    raise RuntimeError(f"batch {logits_BlV.shape[0]} != {len(gens)} generators")
+                # Row slices are views, so in-place top-k/top-p masking still reaches logits_BlV.
+                return torch.cat([fn(logits_BlV[i:i + 1], *args, rng=g, **kwargs) for i, g in enumerate(gens)])
+            return wrapped
+
+        for name, fn in originals.items():
+            setattr(mod, name, per_row(fn))
+        try:
+            yield
+        finally:
+            for name, fn in originals.items():
+                setattr(mod, name, fn)
+
+    def sample(self, class_ids: list[int], seeds: list[int]):
+        """One batch; row i is generated from seeds[i] only.
 
         Returns (BxHxWx3 uint8 images, raw output tensor on CPU, attention record).
         """
+        if len(class_ids) != len(seeds):
+            raise ValueError("class_ids and seeds must have the same length")
         s = self.cfg["sampler"]
-        torch.manual_seed(seed)
         label_B = torch.tensor(class_ids, device=self.device)
         backend = self.cfg["attention"]["sdpa_backend"]
-        with torch.inference_mode(), autocast_ctx(self.cfg["precision"], self.device), sdpa_ctx(backend, self.device):
+        gens = row_generators(seeds, self.device)
+        with torch.inference_mode(), autocast_ctx(self.cfg["precision"], self.device), sdpa_ctx(backend, self.device), \
+                self._per_row_rng(gens):
             sdpa = sdpa_record(backend, self.device)
             img_B3HW = self.var.autoregressive_infer_cfg(
-                B=len(class_ids), label_B=label_B, g_seed=seed,
+                B=len(class_ids), label_B=label_B, g_seed=None,   # randomness comes from gens (see _per_row_rng)
                 cfg=s["cfg"], top_k=s["top_k"], top_p=s["top_p"], more_smooth=s["more_smooth"],
             )  # [0, 1], in the autocast dtype
         # Exactly as demo_sample.ipynb: x*255 on device in the output dtype, then numpy astype(uint8) (truncation).

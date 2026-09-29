@@ -71,7 +71,8 @@ def main():
         if cuda:
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats(device)
-        run = lambda: model.sample(class_ids, args.seed)  # noqa: E731
+        seeds = [args.seed + i for i in range(bs)]
+        run = lambda: model.sample(class_ids, seeds)  # noqa: E731
         cold = timed(run, device)
         warm = [timed(run, device) for _ in range(args.reps)]
         mean = statistics.mean(warm)

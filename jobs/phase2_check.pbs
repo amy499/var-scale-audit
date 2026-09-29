@@ -1,0 +1,137 @@
+#!/bin/bash
+#PBS -N phase2_check
+#PBS -P personal-gura0001
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o outputs/phase2_check/
+#
+# Phase 2 check on NSCC ASPIRE 2A. Submit from the repo root:
+#     qsub jobs/phase2_check.pbs
+# 1 GPU brings a fixed 16 CPUs / 110 GB. <=2 h walltime on 'normal' routes to the gdev queue.
+# Results: outputs/phase2_check/<job id>/summary.txt
+#
+# Every step runs in its own process with the real checkpoints; rows come from $MANIFEST.
+#   1 regression    single-image runner (class 207 seed 0) still hashes to the Phase 1 value
+#   2 repeat        manifest at batch 16 twice per model: every row identical
+#   3 batch         manifest at batch 1 and 4 vs 16: per-row max|diff|, VAR visible count, contact sheet
+#   4 upstream      runner at batch 1 vs plain upstream at B=1, all rows
+#   5 divergence    VAR notebook matched vs asis, one runtime setting changed at a time
+
+set -uo pipefail
+
+if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "ERROR: submit with 'qsub jobs/phase2_check.pbs'; never run GPU work on the login node." >&2
+    exit 1
+fi
+cd "$PBS_O_WORKDIR"
+if [[ ! -f runner/generate.py ]]; then
+    echo "ERROR: submit from the repo root (PBS_O_WORKDIR=$PBS_O_WORKDIR)." >&2
+    exit 1
+fi
+
+CLASS_ID=207        # golden retriever; Phase 1 regression image
+SEED=0
+EXPECT_VAR=48db2d9e166a   # Phase 1 runner tensor sha256 (prefix), class 207 seed 0
+EXPECT_DIT=2a3a0d6fbce9
+MANIFEST=manifest/provisional_4x4.csv
+PIXEL_THRESHOLD=1.0       # grey levels (0-255): mean |pixel diff| above this = visibly different
+VAR_CONFIG=configs/var_d20.yaml
+DIT_CONFIG=configs/dit_xl2_256.yaml
+
+JOB="${PBS_JOBID%%.*}"
+OUT="outputs/phase2_check/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+
+: > "$OUT/steps.tsv"
+step() {   # step NAME CMD...: run, log exit code + duration, keep going
+    local name="$1"; shift
+    echo; echo "===== [$name] $*"
+    local t0=$SECONDS
+    "$@"
+    local rc=$?
+    printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >> "$OUT/steps.tsv"
+    echo "===== [$name] exit=$rc ($((SECONDS - t0))s)"
+    return $rc
+}
+finish() { python scripts/phase2/summarize.py "$OUT"; echo "Summary: $OUT/summary.txt"; }
+config_for() { if [[ "$1" == var ]]; then echo "$VAR_CONFIG"; else echo "$DIT_CONFIG"; fi; }
+
+echo "job=$PBS_JOBID host=$(hostname) date=$(date -Is)"
+nvidia-smi | tee "$OUT/nvidia-smi.txt"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+
+if ! step gpu_check python scripts/phase1/gpu_check.py --out "$OUT/gpu.json"; then
+    echo "FATAL: no GPU visible to torch; stopping. See DIAGNOSIS in the summary."
+    finish
+    exit 2
+fi
+step third_party bash -c "python scripts/check_third_party.py > '$OUT/third_party.txt' 2>&1; rc=\$?; cat '$OUT/third_party.txt'; exit \$rc"
+
+# 1) Regression: the Phase 1 single-image path, then its tensor hash.
+for m in var dit; do
+    step regress_$m python -m runner.generate --config "$(config_for $m)" --class-id $CLASS_ID --seed $SEED \
+        --out "$OUT/regression/$m" --save-raw
+done
+step regression python scripts/phase2/compare_runs.py regression --out "$OUT/regression.json" \
+    var "$OUT/regression/var.pt" $EXPECT_VAR \
+    dit "$OUT/regression/dit.pt" $EXPECT_DIT
+
+# 2) Repeat: manifest at batch 16, twice per model.
+for m in var dit; do
+    step ${m}_bs16 python -m runner.generate --config "$(config_for $m)" --manifest $MANIFEST \
+        --batch-size 16 --out-dir "$OUT/runs/$m/bs16"
+    step ${m}_bs16_again python -m runner.generate --config "$(config_for $m)" --manifest $MANIFEST \
+        --batch-size 16 --out-dir "$OUT/repeat/$m/bs16_again"
+done
+step repeat python scripts/phase2/compare_runs.py repeat --out "$OUT/repeat.json" \
+    var "$OUT/runs/var/bs16" "$OUT/repeat/var/bs16_again" \
+    dit "$OUT/runs/dit/bs16" "$OUT/repeat/dit/bs16_again"
+
+# 3) Batch sensitivity: batch 1 and 4 vs batch 16 (the first run of step 2). compare_runs.py
+#    compares every runs/<model>/<tag> against runs/<model>/bs16.
+for m in var dit; do
+    for bs in 1 4; do
+        step ${m}_bs$bs python -m runner.generate --config "$(config_for $m)" --manifest $MANIFEST \
+            --batch-size $bs --out-dir "$OUT/runs/$m/bs$bs"
+    done
+done
+step batch python scripts/phase2/compare_runs.py batch --out "$OUT/batch.json" --ref bs16 \
+    --pixel-threshold $PIXEL_THRESHOLD --contact-sheet "$OUT/contact_var_bs1_vs_bs16.png" \
+    var "$OUT/runs/var" \
+    dit "$OUT/runs/dit"
+
+# 4) Runner at batch 1 (step 3) vs plain upstream at B=1, same runtime settings.
+for m in var dit; do
+    step upstream_$m python scripts/phase2/upstream_ref.py --config "$(config_for $m)" --manifest $MANIFEST \
+        --out-dir "$OUT/upstream/$m"
+done
+step upstream python scripts/phase2/compare_runs.py upstream --out "$OUT/upstream.json" \
+    var "$OUT/runs/var/bs1" "$OUT/upstream/var" \
+    dit "$OUT/runs/dit/bs1" "$OUT/upstream/dit"
+
+# 5) VAR divergence. Baseline = notebook "matched" (math kernel) in a fresh process.
+#    S1 (kernel) changed: auto; diagnostics: flash, mem_efficient; all rows, one fresh process each.
+#    S2 (order) changed: the Phase 1 script itself (asis then matched in one process), row 207/0,
+#    which must be the manifest's first row (compare uses the first row for the single-row table).
+for k in math auto flash mem_efficient; do
+    step div_$k python scripts/phase2/var_divergence.py run --config "$VAR_CONFIG" --sdpa $k \
+        --manifest $MANIFEST --out-dir "$OUT/divergence/$k"
+done
+step div_phase1_script python scripts/phase1/ref_var_notebook.py --config "$VAR_CONFIG" --class-id $CLASS_ID \
+    --seed $SEED --out "$OUT/divergence/phase1_script/ref_var"
+step divergence python scripts/phase2/var_divergence.py compare --dir "$OUT/divergence" \
+    --runner "$OUT/runs/var/bs1" --pixel-threshold $PIXEL_THRESHOLD --out "$OUT/divergence.json"
+
+step third_party_after python scripts/check_third_party.py
+finish

@@ -66,6 +66,14 @@ def sdpa_record(backend: str, device: torch.device) -> dict:
     return {"requested": backend, "effective": effective, "cuda_sdp_flags": flags}
 
 
+def row_generators(seeds: list[int], device: torch.device) -> list[torch.Generator]:
+    """One generator per image, seeded with that image's own seed.
+
+    Each row's random draws then depend only on its seed, not on batch size or the other rows.
+    """
+    return [torch.Generator(device=device).manual_seed(s) for s in seeds]
+
+
 def _git_sha(path) -> str | None:
     try:
         return subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],

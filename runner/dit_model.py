@@ -6,7 +6,7 @@ import torch
 
 from runner import upstream
 from runner.config import resolve_path
-from runner.runtime import autocast_ctx, sdpa_ctx, sdpa_record
+from runner.runtime import autocast_ctx, row_generators, sdpa_ctx, sdpa_record
 
 
 class DiTModel:
@@ -49,22 +49,46 @@ class DiTModel:
             "blocks_fused_attn": fused,
         }
 
-    def sample(self, class_ids: list[int], seed: int):
-        """One batch (one seed for the whole batch).
+    def _p_sample_loop(self, sample_fn, z, model_kwargs, gens, using_cfg):
+        """Upstream p_sample_loop (gaussian_diffusion.py, p_sample_loop_progressive + p_sample),
+        except that each step's noise is drawn per row from that row's generator.
+
+        Upstream draws one th.randn_like(x) per step from the global RNG for the whole batch.
+        Here row i draws a tensor of the shape upstream would draw at B=1 ((2, C, H, W) with CFG,
+        else (1, C, H, W)); with CFG, its [0] goes to row i and its [1] to row i's unconditional
+        copy (n + i). At B=1 this consumes the generator exactly as upstream consumes the global
+        RNG after torch.manual_seed(seed).
+        """
+        k = 2 if using_cfg else 1
+        img = z
+        for i in list(range(self.diffusion.num_timesteps))[::-1]:
+            t = torch.tensor([i] * img.shape[0], device=self.device)
+            out = self.diffusion.p_mean_variance(sample_fn, img, t, clip_denoised=False, model_kwargs=model_kwargs)
+            draws = [torch.randn((k, *img.shape[1:]), generator=g, device=self.device) for g in gens]
+            noise = torch.cat([d[j:j + 1] for j in range(k) for d in draws])
+            nonzero_mask = (t != 0).float().view(-1, *([1] * (len(img.shape) - 1)))  # no noise when t == 0
+            img = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
+        return img
+
+    def sample(self, class_ids: list[int], seeds: list[int]):
+        """One batch; row i is generated from seeds[i] only.
 
         Returns (BxHxWx3 uint8 images, raw decoded tensor on CPU, attention record).
-        Mirrors the per-batch body of DiT sample_ddp.py (the FID script).
+        Mirrors the per-batch body of DiT sample_ddp.py (the FID script), with per-row noise.
         """
+        if len(class_ids) != len(seeds):
+            raise ValueError("class_ids and seeds must have the same length")
         n = len(class_ids)
         cfg_scale = self.cfg["sampler"]["cfg_scale"]
         assert cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"  # as sample_ddp.py
         using_cfg = cfg_scale > 1.0
         backend = self.cfg["attention"]["sdpa_backend"]
-        torch.manual_seed(seed)
+        gens = row_generators(seeds, self.device)
 
         with torch.no_grad(), autocast_ctx(self.cfg["precision"], self.device), sdpa_ctx(backend, self.device):
             sdpa = sdpa_record(backend, self.device)
-            z = torch.randn(n, self.model.in_channels, self.latent_size, self.latent_size, device=self.device)
+            shape = (self.model.in_channels, self.latent_size, self.latent_size)
+            z = torch.cat([torch.randn((1, *shape), generator=g, device=self.device) for g in gens])
             y = torch.tensor(class_ids, device=self.device)
             if using_cfg:
                 z = torch.cat([z, z], 0)
@@ -75,9 +99,7 @@ class DiTModel:
             else:
                 model_kwargs = dict(y=y)
                 sample_fn = self.model.forward
-            samples = self.diffusion.p_sample_loop(
-                sample_fn, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=self.device
-            )
+            samples = self._p_sample_loop(sample_fn, z, model_kwargs, gens, using_cfg)
             if using_cfg:
                 samples, _ = samples.chunk(2, dim=0)
             samples = self.vae.decode(samples / 0.18215).sample
