@@ -1,0 +1,128 @@
+#!/bin/bash
+#PBS -N phase2b_tokens
+#PBS -P personal-gura0001
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o outputs/phase2b_check/
+#
+# Phase 2b on NSCC ASPIRE 2A: where in VAR's scale sequence do batch 1 and batch 16 first sample
+# different tokens, and is fp16 the cause? Submit from the repo root:
+#     qsub jobs/phase2b_tokens.pbs
+#     qsub -v PHASE2_DIR=outputs/phase2_check/<jobid> jobs/phase2b_tokens.pbs   # pick the Phase 2 run
+# Without PHASE2_DIR the newest outputs/phase2_check/<jobid> with a batch.json is used (if any).
+# 1 GPU brings a fixed 16 CPUs / 110 GB. <=2 h walltime on 'normal' routes to the gdev queue.
+# Results: outputs/phase2b_check/<job id>/summary.txt, divergence_per_scale.png
+#
+# Every step runs in its own process with the real checkpoints; VAR only; rows from $MANIFEST.
+#   1  capture proof  class 207 seed 0 with token capture off / on (+ DiT) must keep the Phase 1 hashes;
+#                     fp16 manifest runs with capture on must equal Phase 2's (capture off) runs
+#   2  fp16           capture tokens at batch 1 and 16 (config precision: fp16 autocast, math kernel)
+#   3  fp32           same with autocast off (tf32 as configured), and with tf32 also off
+#   4  analysis       per row / per scale divergence, pixel correlation, top-2 at the first flip; plot
+
+set -uo pipefail
+
+if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "ERROR: submit with 'qsub jobs/phase2b_tokens.pbs'; never run GPU work on the login node." >&2
+    exit 1
+fi
+cd "$PBS_O_WORKDIR"
+if [[ ! -f runner/generate.py ]]; then
+    echo "ERROR: submit from the repo root (PBS_O_WORKDIR=$PBS_O_WORKDIR)." >&2
+    exit 1
+fi
+
+CLASS_ID=207        # golden retriever; Phase 1 regression image
+SEED=0
+EXPECT_VAR=48db2d9e166a   # Phase 1 runner tensor sha256 (prefix), class 207 seed 0
+EXPECT_DIT=2a3a0d6fbce9
+MANIFEST=manifest/provisional_4x4.csv
+VAR_CONFIG=configs/var_d20.yaml
+DIT_CONFIG=configs/dit_xl2_256.yaml
+if [[ -z "${PHASE2_DIR:-}" ]]; then
+    PHASE2_DIR="$(ls -td outputs/phase2_check/*/ 2>/dev/null | while read -r p; do [[ -f "$p/batch.json" ]] && { echo "${p%/}"; break; }; done)"
+fi
+
+JOB="${PBS_JOBID%%.*}"
+OUT="outputs/phase2b_check/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+
+: > "$OUT/steps.tsv"
+step() {   # step NAME CMD...: run, log exit code + duration, keep going
+    local name="$1"; shift
+    echo; echo "===== [$name] $*"
+    local t0=$SECONDS
+    "$@"
+    local rc=$?
+    printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >> "$OUT/steps.tsv"
+    echo "===== [$name] exit=$rc ($((SECONDS - t0))s)"
+    return $rc
+}
+finish() { python scripts/phase2b/summarize.py "$OUT"; echo "Summary: $OUT/summary.txt"; }
+
+echo "job=$PBS_JOBID host=$(hostname) date=$(date -Is) PHASE2_DIR=${PHASE2_DIR:-<none>}"
+nvidia-smi | tee "$OUT/nvidia-smi.txt"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+
+if ! step gpu_check python scripts/phase1/gpu_check.py --out "$OUT/gpu.json"; then
+    echo "FATAL: no GPU visible to torch; stopping. See DIAGNOSIS in the summary."
+    finish
+    exit 2
+fi
+step third_party bash -c "python scripts/check_third_party.py > '$OUT/third_party.txt' 2>&1; rc=\$?; cat '$OUT/third_party.txt'; exit \$rc"
+
+# 1) Capture proof: same single image with capture off and on (+ DiT, which has no capture).
+step regress_var_off python -m runner.generate --config "$VAR_CONFIG" --class-id $CLASS_ID --seed $SEED \
+    --out "$OUT/regression/var_capture_off" --save-raw
+step regress_var_on python -m runner.generate --config "$VAR_CONFIG" --class-id $CLASS_ID --seed $SEED \
+    --out "$OUT/regression/var_capture_on" --save-raw --capture-tokens
+step regress_dit python -m runner.generate --config "$DIT_CONFIG" --class-id $CLASS_ID --seed $SEED \
+    --out "$OUT/regression/dit" --save-raw
+step regression python scripts/phase2/compare_runs.py regression --out "$OUT/regression.json" \
+    var_capture_off "$OUT/regression/var_capture_off.pt" $EXPECT_VAR \
+    var_capture_on  "$OUT/regression/var_capture_on.pt"  $EXPECT_VAR \
+    dit             "$OUT/regression/dit.pt"             $EXPECT_DIT
+
+# 2-3) Token capture at batch 1 and 16 for each precision.
+step config_fp32 python scripts/phase2b/tokens.py config --config "$VAR_CONFIG" --autocast none \
+    --out "$OUT/configs/fp32.yaml"
+step config_fp32_notf32 python scripts/phase2b/tokens.py config --config "$VAR_CONFIG" --autocast none --tf32 false \
+    --out "$OUT/configs/fp32_notf32.yaml"
+declare -A PREC_CONFIG=([fp16]="$VAR_CONFIG" [fp32]="$OUT/configs/fp32.yaml" [fp32_notf32]="$OUT/configs/fp32_notf32.yaml")
+for p in fp16 fp32 fp32_notf32; do
+    for bs in 1 16; do
+        step ${p}_bs$bs python -m runner.generate --config "${PREC_CONFIG[$p]}" --manifest $MANIFEST \
+            --batch-size $bs --out-dir "$OUT/tokens/$p/bs$bs" --capture-tokens
+    done
+done
+
+# 1b) fp16 manifest runs (capture on) must equal Phase 2's runs (capture off), row by row.
+if [[ -n "${PHASE2_DIR:-}" && -f "$PHASE2_DIR/runs/var/bs1/run.json" ]]; then
+    step vs_phase2 python scripts/phase2/compare_runs.py repeat --out "$OUT/vs_phase2.json" \
+        bs1  "$PHASE2_DIR/runs/var/bs1"  "$OUT/tokens/fp16/bs1" \
+        bs16 "$PHASE2_DIR/runs/var/bs16" "$OUT/tokens/fp16/bs16"
+fi
+
+# 4) Analysis (no model), plot, summary. Phase 2's pixel diffs are fp16 bs1 vs bs16, so only fp16 uses them.
+for p in fp16 fp32 fp32_notf32; do
+    phase2_arg=()
+    [[ $p == fp16 && -n "${PHASE2_DIR:-}" ]] && phase2_arg=(--phase2-batch "$PHASE2_DIR/batch.json")
+    step analyze_$p python scripts/phase2b/tokens.py analyze --name $p \
+        --a "$OUT/tokens/$p/bs1" --b "$OUT/tokens/$p/bs16" ${phase2_arg[@]+"${phase2_arg[@]}"} --out "$OUT/tokens_$p.json"
+done
+step plot python scripts/phase2b/tokens.py plot --out "$OUT/divergence_per_scale.png" \
+    fp16="$OUT/tokens_fp16.json" fp32="$OUT/tokens_fp32.json" fp32_notf32="$OUT/tokens_fp32_notf32.json"
+
+step third_party_after python scripts/check_third_party.py
+finish

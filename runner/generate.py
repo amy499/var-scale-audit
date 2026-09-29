@@ -46,6 +46,17 @@ def tensor_sha256(t: torch.Tensor) -> str:
     return h.hexdigest()
 
 
+def capture_kw(capture: list | None) -> dict:
+    """Pass capture only when on, so the default call is exactly today's."""
+    return {} if capture is None else {"capture": capture}
+
+
+def row_tokens(capture: list[dict], i: int, cfg: dict) -> dict:
+    """Row i of a batch capture: per scale, that image's tensors (idx, top2_p, top2_i, p_chosen)."""
+    return {"patch_nums": list(cfg["build"]["patch_nums"]),
+            "scales": [{k: v[i].clone() for k, v in scale.items()} for scale in capture]}
+
+
 def settings_record(cfg: dict, device: torch.device) -> dict:
     return {
         "model": cfg["model"],
@@ -63,6 +74,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, type=Path)
     ap.add_argument("--device", help="override config device (e.g. cpu for a smoke test)")
+    ap.add_argument("--capture-tokens", action="store_true",
+                    help="VAR only: also save each image's sampled token ids per scale as <stem>.tokens.pt "
+                         "(read-only; outputs are unchanged)")
     one = ap.add_argument_group("one image")
     one.add_argument("--class-id", type=int)
     one.add_argument("--seed", type=int)
@@ -95,6 +109,9 @@ def main(argv=None):
     if bad:
         ap.error(f"class_id must be in [0, {num_classes}); got {bad[:5]}")
 
+    if args.capture_tokens and cfg["model"] != "var":
+        ap.error("--capture-tokens is VAR only")
+
     device = torch.device(cfg["device"])
     apply_precision(cfg["precision"])
     t0 = time.time()
@@ -102,18 +119,22 @@ def main(argv=None):
     t_load = time.time() - t0
 
     if not args.manifest:
-        imgs, raw, attention = model.sample([args.class_id], [args.seed])
+        capture = [] if args.capture_tokens else None
+        imgs, raw, attention = model.sample([args.class_id], [args.seed], **capture_kw(capture))
         t_sample = time.time() - t0 - t_load
         out = args.out or OUTPUTS_DIR / Path(cfg["_path"]).stem / rows[0].stem
         out.parent.mkdir(parents=True, exist_ok=True)
         Image.fromarray(imgs[0]).save(out.with_suffix(".png"))
         if args.save_raw:
             torch.save(raw, out.with_suffix(".pt"))
+        if capture is not None:
+            torch.save(row_tokens(capture, 0, cfg), out.with_suffix(".tokens.pt"))
         record = {
             **settings_record(cfg, device),
             "class_id": args.class_id,
             "seed": args.seed,
             "attention": attention,
+            "capture_tokens": args.capture_tokens,
             "seconds": {"load": round(t_load, 2), "sample": round(t_sample, 2)},
         }
         out.with_suffix(".json").write_text(json.dumps(record, indent=2))
@@ -126,12 +147,16 @@ def main(argv=None):
     for start in range(0, len(rows), args.batch_size):
         batch = rows[start:start + args.batch_size]
         t1 = time.time()
-        imgs, raw, attention = model.sample([r.class_id for r in batch], [r.seed for r in batch])
+        capture = [] if args.capture_tokens else None
+        imgs, raw, attention = model.sample([r.class_id for r in batch], [r.seed for r in batch],
+                                            **capture_kw(capture))
         t_sample += time.time() - t1
         for i, r in enumerate(batch):
             one_raw = raw[i:i + 1].clone()  # 1xCxHxW, own storage (a view would save the whole batch)
             Image.fromarray(imgs[i]).save(out_dir / f"{r.stem}.png")
             torch.save(one_raw, out_dir / f"{r.stem}.pt")
+            if capture is not None:
+                torch.save(row_tokens(capture, i, cfg), out_dir / f"{r.stem}.tokens.pt")
             results.append({"class_id": r.class_id, "seed": r.seed, "file": r.stem,
                             "tensor_sha256": tensor_sha256(one_raw)})
         print(f"[{start + len(batch)}/{len(rows)}] rows done", flush=True)
@@ -140,6 +165,7 @@ def main(argv=None):
         **settings_record(cfg, device),
         "manifest": str(args.manifest.resolve()),
         "batch_size": args.batch_size,
+        "capture_tokens": args.capture_tokens,
         "attention": attention,
         "seconds": {"load": round(t_load, 2), "sample": round(t_sample, 2)},
         "rows": results,

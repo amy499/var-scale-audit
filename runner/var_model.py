@@ -76,7 +76,7 @@ class VARModel:
         return rec
 
     @contextlib.contextmanager
-    def _per_row_rng(self, gens: list[torch.Generator]):
+    def _per_row_rng(self, gens: list[torch.Generator], capture: list | None = None):
         """Make each image's token sampling use only its own generator.
 
         Upstream autoregressive_infer_cfg seeds one generator (self.rng, via g_seed) and samples
@@ -89,28 +89,40 @@ class VARModel:
         mod = self._var_module
         originals = {name: getattr(mod, name) for name in self._SAMPLING_HELPERS}
 
-        def per_row(fn):
+        def per_row(fn, record):
             def wrapped(logits_BlV, *args, rng=None, **kwargs):
                 if rng is not None:
                     raise RuntimeError("upstream passed its shared rng; call with g_seed=None")
                 if logits_BlV.shape[0] != len(gens):
                     raise RuntimeError(f"batch {logits_BlV.shape[0]} != {len(gens)} generators")
+                if record is not None:
+                    # Read-only: a new tensor, computed before the helper masks logits_BlV in place.
+                    probs = logits_BlV.softmax(dim=-1)
                 # Row slices are views, so in-place top-k/top-p masking still reaches logits_BlV.
-                return torch.cat([fn(logits_BlV[i:i + 1], *args, rng=g, **kwargs) for i, g in enumerate(gens)])
+                out = torch.cat([fn(logits_BlV[i:i + 1], *args, rng=g, **kwargs) for i, g in enumerate(gens)])
+                if record is not None:
+                    top2_p, top2_i = probs.topk(2, dim=-1)
+                    record.append({"idx": out[..., 0].cpu(), "top2_p": top2_p.float().cpu(), "top2_i": top2_i.cpu(),
+                                   "p_chosen": probs.gather(-1, out[..., :1])[..., 0].float().cpu()})
+                return out
             return wrapped
 
         for name, fn in originals.items():
-            setattr(mod, name, per_row(fn))
+            setattr(mod, name, per_row(fn, capture if name == "sample_with_top_k_top_p_" else None))
         try:
             yield
         finally:
             for name, fn in originals.items():
                 setattr(mod, name, fn)
 
-    def sample(self, class_ids: list[int], seeds: list[int]):
+    def sample(self, class_ids: list[int], seeds: list[int], capture: list | None = None):
         """One batch; row i is generated from seeds[i] only.
 
         Returns (BxHxWx3 uint8 images, raw output tensor on CPU, attention record).
+        capture: if a list, one dict per scale is appended (all CPU tensors, batch-first):
+          idx (B, l) sampled token ids; top2_p / top2_i (B, l, 2) the two most likely tokens;
+          p_chosen (B, l) probability of the sampled token. Probabilities are the model's post-CFG
+          softmax before top-k/top-p filtering. Read-only: outputs are the same with or without it.
         """
         if len(class_ids) != len(seeds):
             raise ValueError("class_ids and seeds must have the same length")
@@ -119,7 +131,7 @@ class VARModel:
         backend = self.cfg["attention"]["sdpa_backend"]
         gens = row_generators(seeds, self.device)
         with torch.inference_mode(), autocast_ctx(self.cfg["precision"], self.device), sdpa_ctx(backend, self.device), \
-                self._per_row_rng(gens):
+                self._per_row_rng(gens, capture):
             sdpa = sdpa_record(backend, self.device)
             img_B3HW = self.var.autoregressive_infer_cfg(
                 B=len(class_ids), label_B=label_B, g_seed=None,   # randomness comes from gens (see _per_row_rng)
