@@ -22,6 +22,7 @@ dependencies:
   - numpy>=1.24,<2         # torch 2.1 wheels are built against NumPy 1.x
   - pillow
   - tqdm
+  - pyyaml                 # configs/ (runner + download script)
   - pip
   - pip:
       # --- VAR ---
@@ -35,3 +36,5 @@ dependencies:
       - accelerate==0.30.1          # listed by DiT but never imported
       # --- this project ---
       - -e .
+variables:
+  PYTHONDONTWRITEBYTECODE: "1"   # never write __pycache__ into third_party/

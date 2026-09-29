@@ -1,0 +1,42 @@
+# VAR-d20, ImageNet 256x256, class-conditional.
+# Sampler settings match VAR README "FID evaluation":
+#   var.autoregressive_infer_cfg(..., cfg=1.5, top_p=0.96, top_k=900, more_smooth=False)
+model: var
+device: cuda
+
+checkpoints:   # paths are relative to the repo root; HF files pinned to a repo revision
+  vae:
+    path: checkpoints/var/vae_ch160v4096z32.pth
+    url: https://huggingface.co/FoundationVision/var/resolve/6d0ee6598a42f75079aa79e58b012b57b284c91b/vae_ch160v4096z32.pth
+    sha256: 7c3ec27ae28a3f87055e83211ea8cc8558bd1985d7b51742d074fb4c2fcf186c
+  var:
+    path: checkpoints/var/var_d20.pth
+    url: https://huggingface.co/FoundationVision/var/resolve/6d0ee6598a42f75079aa79e58b012b57b284c91b/var_d20.pth
+    sha256: f7d232978e6fe82a4f2e0f5d82b012e01b1aa5abfe93ce2b56104ec0e878a10f
+
+build:   # kwargs for upstream models.build_vae_var (values from VAR demo_sample.ipynb)
+  depth: 20
+  patch_nums: [1, 2, 3, 4, 5, 6, 8, 10, 13, 16]
+  V: 4096
+  Cvae: 32
+  ch: 160
+  share_quant_resi: 4
+  num_classes: 1000
+  shared_aln: false
+
+sampler:   # kwargs for upstream VAR.autoregressive_infer_cfg
+  cfg: 1.5
+  top_k: 900
+  top_p: 0.96
+  more_smooth: false
+
+attention:
+  # VAR is always built with flash_if_available=False, fused_if_available=False,
+  # so it calls torch.nn.functional.scaled_dot_product_attention. This picks the
+  # SDPA kernel on CUDA: math | flash | mem_efficient | auto (auto = PyTorch decides, not recorded exactly).
+  sdpa_backend: math
+
+precision:
+  autocast_dtype: float16   # float16 | bfloat16 | null; VAR demo_sample.ipynb uses float16 autocast
+  tf32: true
+  cudnn_deterministic: true

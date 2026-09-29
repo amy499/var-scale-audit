@@ -1,0 +1,38 @@
+# DiT-XL/2, ImageNet 256x256, class-conditional.
+# Sampler settings match DiT's FID script (sample_ddp.py defaults, used by README "Evaluation"):
+#   --cfg-scale 1.5  --num-sampling-steps 250  --vae ema  --tf32
+model: dit
+device: cuda
+
+checkpoints:   # paths are relative to the repo root
+  dit:
+    path: checkpoints/dit/DiT-XL-2-256x256.pt
+    url: https://dl.fbaipublicfiles.com/DiT/models/DiT-XL-2-256x256.pt
+    sha256: null   # not published upstream; download script records the computed hash
+  vae:   # sample_ddp.py default --vae ema -> stabilityai/sd-vae-ft-ema
+    path: checkpoints/sd-vae-ft-ema
+    files:
+      config.json:
+        url: https://huggingface.co/stabilityai/sd-vae-ft-ema/resolve/f04b2c4b98319346dad8c65879f680b1997b204a/config.json
+        sha256: 92d3dfb746fca211a2c9e019e285f8597412211728dce3c5bcf4eda0f2d62e7e
+      diffusion_pytorch_model.safetensors:
+        url: https://huggingface.co/stabilityai/sd-vae-ft-ema/resolve/f04b2c4b98319346dad8c65879f680b1997b204a/diffusion_pytorch_model.safetensors
+        sha256: 32db726da04f06c1b6b14c0043ce115cc87a501482945c5add89a40d838fcb46
+
+build:
+  model: DiT-XL/2
+  image_size: 256
+  num_classes: 1000
+
+sampler:
+  cfg_scale: 1.5
+  num_sampling_steps: 250
+
+attention:
+  # timm's Attention (used by DiT) calls SDPA when timm's fused_attn is on (its default).
+  sdpa_backend: math   # math | flash | mem_efficient | auto
+
+precision:
+  autocast_dtype: null   # sample_ddp.py samples in fp32
+  tf32: true             # sample_ddp.py --tf32 default
+  cudnn_deterministic: true

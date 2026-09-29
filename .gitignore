@@ -1,6 +1,7 @@
 # Large artifacts: model weights and generated samples
-checkpoints/
-outputs/
+# (no trailing slash on checkpoints: on NSCC it is a symlink to project storage)
+/checkpoints
+/outputs
 
 # Python
 __pycache__/
