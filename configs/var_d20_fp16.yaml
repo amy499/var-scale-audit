@@ -1,4 +1,6 @@
-# VAR-d20, ImageNet 256x256, class-conditional.
+# VAR-d20, ImageNet 256x256, class-conditional. fp16 autocast: the pre-Phase-3 settings (Phase 1-2b),
+# used only by the historical Phase 1-2b jobs (to reproduce their fp16 results) and by the fp16 side of
+# the timing comparison in jobs/phase3_check.pbs. Experiments use configs/var_d20.yaml (strict fp32).
 # Sampler settings match VAR README "FID evaluation":
 #   var.autoregressive_infer_cfg(..., cfg=1.5, top_p=0.96, top_k=900, more_smooth=False)
 model: var
@@ -37,8 +39,6 @@ attention:
   sdpa_backend: math
 
 precision:
-  # Strict fp32 (team decision, Phase 3): autocast off and TF32 off. VAR demo_sample.ipynb uses float16
-  # autocast with TF32; those settings are kept in configs/var_d20_fp16.yaml (timing comparison only).
-  autocast_dtype: null      # float16 | bfloat16 | null
-  tf32: false
+  autocast_dtype: float16   # float16 | bfloat16 | null; VAR demo_sample.ipynb uses float16 autocast
+  tf32: true
   cudnn_deterministic: true

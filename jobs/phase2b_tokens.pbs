@@ -39,7 +39,7 @@ SEED=0
 EXPECT_VAR=48db2d9e166a   # Phase 1 runner tensor sha256 (prefix), class 207 seed 0
 EXPECT_DIT=2a3a0d6fbce9
 MANIFEST=manifest/provisional_4x4.csv
-VAR_CONFIG=configs/var_d20.yaml
+VAR_CONFIG=configs/var_d20_fp16.yaml   # historical fp16 settings (Phase 1-2b); configs/var_d20.yaml is now strict fp32
 DIT_CONFIG=configs/dit_xl2_256.yaml
 if [[ -z "${PHASE2_DIR:-}" ]]; then
     PHASE2_DIR="$(ls -td outputs/phase2_check/*/ 2>/dev/null | while read -r p; do [[ -f "$p/batch.json" ]] && { echo "${p%/}"; break; }; done)"

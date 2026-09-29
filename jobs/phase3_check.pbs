@@ -1,0 +1,139 @@
+#!/bin/bash
+#PBS -N phase3_check
+#PBS -P personal-gura0001
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o outputs/phase3_check/
+#
+# Phase 3 check on NSCC ASPIRE 2A (hooks). Submit from the repo root:
+#     qsub jobs/phase3_check.pbs
+# 1 GPU brings a fixed 16 CPUs / 110 GB. <=2 h walltime on 'normal' routes to the gdev queue.
+# Results: outputs/phase3_check/<job id>/summary.txt
+#
+# Every step runs in its own process with the real checkpoints; rows come from $MANIFEST.
+# VAR runs in strict fp32 (configs/var_d20.yaml: autocast off, TF32 off); DiT is unchanged.
+#   1 timing        VAR-d20 at batch 16: strict fp32 (configs/var_d20.yaml) vs fp16 autocast
+#                   (configs/var_d20_fp16.yaml, the old settings), 3 warm reps each: time per 1,000 images, peak memory
+#   2 baseline      no hooks, both models, batch 16 -> baseline_var/, baseline_dit/
+#     batch         VAR fp32 at batch 1 vs 16 on the manifest: rows identical, max pixel diff (measured)
+#     upstream      VAR fp32 runner at batch 1 vs plain upstream at B=1, all manifest rows (must be identical)
+#   3 regression    class 207 seed 0 at batch 1: VAR records its new fp32 hash (EXPECT_VAR=record) and the
+#                   no-op/observe-hook run must equal it; DiT must equal the Phase 1 hash with and without hooks
+#     hooks         scripts/phase3/check_hooks.py --configs real (tests a-e and doc tests 4-6, batch 16)
+# CPU-only results (VAR more_smooth, DiT without CFG) are listed at the end of the summary.
+
+set -uo pipefail
+
+if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "ERROR: submit with 'qsub jobs/phase3_check.pbs'; never run GPU work on the login node." >&2
+    exit 1
+fi
+cd "$PBS_O_WORKDIR"
+if [[ ! -f runner/generate.py ]]; then
+    echo "ERROR: submit from the repo root (PBS_O_WORKDIR=$PBS_O_WORKDIR)." >&2
+    exit 1
+fi
+
+CLASS_ID=207        # golden retriever; Phase 1 regression image
+SEED=0
+EXPECT_VAR=record         # VAR strict fp32: no reference yet; this job records it (set the prefix once pinned).
+                          # The Phase 1 fp16 hash 48db2d9e166a no longer applies (see README).
+EXPECT_DIT=2a3a0d6fbce9   # Phase 1 runner tensor sha256 (prefix), class 207 seed 0; DiT unchanged
+PIXEL_THRESHOLD=1.0       # grey levels (0-255): mean |pixel diff| above this = visibly different
+MANIFEST=manifest/provisional_4x4.csv
+BATCH=16
+TIMING_REPS=3
+VAR_CONFIG=configs/var_d20.yaml               # strict fp32
+VAR_FP16_CONFIG=configs/var_d20_fp16.yaml     # old fp16 settings; here only for the timing comparison
+DIT_CONFIG=configs/dit_xl2_256.yaml
+HOOKS=scripts/phase3/hooks_lib.py
+
+JOB="${PBS_JOBID%%.*}"
+OUT="outputs/phase3_check/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+
+: > "$OUT/steps.tsv"
+step() {   # step NAME CMD...: run, log exit code + duration, keep going
+    local name="$1"; shift
+    echo; echo "===== [$name] $*"
+    local t0=$SECONDS
+    "$@"
+    local rc=$?
+    printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >> "$OUT/steps.tsv"
+    echo "===== [$name] exit=$rc ($((SECONDS - t0))s)"
+    return $rc
+}
+finish() { python scripts/phase3/summarize.py "$OUT"; echo "Summary: $OUT/summary.txt"; }
+config_for() { if [[ "$1" == var ]]; then echo "$VAR_CONFIG"; else echo "$DIT_CONFIG"; fi; }
+
+echo "job=$PBS_JOBID host=$(hostname) date=$(date -Is)"
+nvidia-smi | tee "$OUT/nvidia-smi.txt"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+
+if ! step gpu_check python scripts/phase1/gpu_check.py --out "$OUT/gpu.json"; then
+    echo "FATAL: no GPU visible to torch; stopping. See DIAGNOSIS in the summary."
+    finish
+    exit 2
+fi
+step third_party bash -c "python scripts/check_third_party.py > '$OUT/third_party.txt' 2>&1; rc=\$?; cat '$OUT/third_party.txt'; exit \$rc"
+
+# 1) Timing: VAR-d20 at batch 16, strict fp32 (the config) vs fp16 autocast (the old settings).
+step timing_var_fp32_strict python scripts/phase1/timing.py --config "$VAR_CONFIG" --batch-sizes $BATCH \
+    --reps $TIMING_REPS --n-images 1000 --out "$OUT/timing_var_fp32_strict.json"
+step timing_var_fp16 python scripts/phase1/timing.py --config "$VAR_FP16_CONFIG" --batch-sizes $BATCH \
+    --reps $TIMING_REPS --n-images 1000 --out "$OUT/timing_var_fp16.json"
+
+# 2) Baseline dry run: no hooks, both models, batch 16, the provisional manifest.
+for m in var dit; do
+    step baseline_$m python -m runner.generate --config "$(config_for $m)" --manifest $MANIFEST \
+        --batch-size $BATCH --out-dir "$OUT/baseline_$m"
+done
+
+# 2b) Batch invariance, VAR fp32: batch 1 vs batch 16 (the baseline), every manifest row. Measured, not pass/fail.
+mkdir -p "$OUT/batch/var"
+ln -sfn "../../baseline_var" "$OUT/batch/var/bs16"
+step var_bs1 python -m runner.generate --config "$VAR_CONFIG" --manifest $MANIFEST --batch-size 1 \
+    --out-dir "$OUT/batch/var/bs1"
+step batch python scripts/phase2/compare_runs.py batch --out "$OUT/batch.json" --ref bs16 \
+    --pixel-threshold $PIXEL_THRESHOLD var "$OUT/batch/var"
+
+# 2c) VAR fp32 runner at batch 1 (step 2b's run) vs the plain upstream call at B=1, same config and
+#     runtime settings, every manifest row. Pass/fail: all rows identical.
+step upstream_var python scripts/phase2/upstream_ref.py --config "$VAR_CONFIG" --manifest $MANIFEST \
+    --out-dir "$OUT/upstream/var"
+step upstream python scripts/phase2/compare_runs.py upstream --out "$OUT/upstream.json" \
+    var "$OUT/batch/var/bs1" "$OUT/upstream/var"
+
+# 3a) Regression at batch 1, class 207 seed 0, without hooks and with no-op Modify + Observe on both sides.
+#     VAR: record the fp32 hash; the hooked run must equal it. DiT: both must equal the Phase 1 hash.
+for m in var dit; do
+    step regress_$m python -m runner.generate --config "$(config_for $m)" --class-id $CLASS_ID --seed $SEED \
+        --out "$OUT/regression/$m" --save-raw
+    step regress_hooked_$m env PHASE3_LOG="$OUT/regression/hooked_$m.jsonl" \
+        python -m runner.generate --config "$(config_for $m)" --class-id $CLASS_ID --seed $SEED \
+        --out "$OUT/regression/hooked_$m" --save-raw \
+        --hook $HOOKS:noop_before --hook $HOOKS:noop_after --hook $HOOKS:observe
+done
+step regression python scripts/phase3/regression.py --out "$OUT/regression.json" \
+    var "$OUT/regression/var.pt" "$OUT/regression/hooked_var.pt" $EXPECT_VAR \
+    dit "$OUT/regression/dit.pt" "$OUT/regression/hooked_dit.pt" $EXPECT_DIT
+
+# 3b) All hook tests on real weights, batch 16. Its baseline runs must equal step 2's.
+step hooks python scripts/phase3/check_hooks.py --configs real --manifest $MANIFEST --work "$OUT/hooks"
+step baseline_repeat python scripts/phase2/compare_runs.py repeat --out "$OUT/baseline_repeat.json" \
+    var "$OUT/baseline_var" "$OUT/hooks/var_d20/base" \
+    dit "$OUT/baseline_dit" "$OUT/hooks/dit_xl2_256/base"
+
+step third_party_after python scripts/check_third_party.py
+finish

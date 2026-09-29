@@ -63,8 +63,10 @@ def make_tiny(repo: str, work: Path):
         torch.save(vae.state_dict(), work / "var_tiny_vae.pth")
         torch.save(var.state_dict(), work / "var_tiny.pth")
         ckpts = {"vae": {"path": str(work / "var_tiny_vae.pth")}, "var": {"path": str(work / "var_tiny.pth")}}
+        # Same precision flags as the real VAR config (on CPU, autocast and TF32 have no effect either way).
+        precision = yaml.safe_load((REPO / "configs" / "var_d20.yaml").read_text())["precision"]
         for name, smooth in (("var_tiny", False), ("var_tiny_smooth", True)):
-            configs[name] = {"model": "var", **BASE, "checkpoints": ckpts, "build": VAR_BUILD,
+            configs[name] = {"model": "var", **BASE, "precision": precision, "checkpoints": ckpts, "build": VAR_BUILD,
                              "sampler": {**VAR_SAMPLER, "more_smooth": smooth}}
     else:
         from diffusers.models import AutoencoderKL

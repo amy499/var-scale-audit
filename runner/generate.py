@@ -14,6 +14,8 @@ The manifest size must be a multiple of --batch-size unless --allow-partial-batc
 
 Hooks (runner/hooks.py, docs/hooks_quickstart.md): --hook path/to/file.py:NAME or --hook package.module:NAME,
 repeatable, where NAME is an Observe/Modify hook or a list of them. They are recorded in the output JSON.
+DiT only: --skip-timesteps T [T ...] skips the model evaluation at those original timesteps
+(docs/hook_interface.md section 11b).
 """
 
 import argparse
@@ -120,6 +122,11 @@ def main(argv=None):
                          "(read-only; outputs are unchanged)")
     ap.add_argument("--hook", action="append", default=[], metavar="FILE.py:NAME|MODULE:NAME",
                     help="register Observe/Modify hooks (repeatable; see runner/hooks.py)")
+    ap.add_argument("--skip-timesteps", type=int, nargs="+", default=[], metavar="T",
+                    help="DiT only: skip the model evaluation at these original timesteps; the previous step is "
+                         "merged into the next kept one and the skipped step's noise is still drawn "
+                         "(docs/hook_interface.md section 11b)")
+    ap.add_argument("--no-burn-skipped", action="store_true", help=argparse.SUPPRESS)   # test only: unpairs the run
     one = ap.add_argument_group("one image")
     one.add_argument("--class-id", type=int)
     one.add_argument("--seed", type=int)
@@ -159,23 +166,35 @@ def main(argv=None):
 
     if args.capture_tokens and cfg["model"] != "var":
         ap.error("--capture-tokens is VAR only")
+    if (args.skip_timesteps or args.no_burn_skipped) and cfg["model"] != "dit":
+        ap.error("--skip-timesteps is DiT only")
+    if args.no_burn_skipped and not args.skip_timesteps:
+        ap.error("--no-burn-skipped needs --skip-timesteps")
+    # Passed only when given, so the default call is exactly today's.
+    skip_kw = {"skip_timesteps": args.skip_timesteps} if args.skip_timesteps else {}
     try:
         hooks = load_hooks(args.hook)
     except (ValueError, ImportError, AttributeError, OSError) as e:
         ap.error(str(e))
     hook_records = [h.record() for h in hooks]
+    sample_kw = {**hooks_kw(hooks), **skip_kw, **({"_burn_skipped": False} if args.no_burn_skipped else {})}
 
     device = torch.device(cfg["device"])
     apply_precision(cfg["precision"])
     t0 = time.time()
     model = load_model(cfg)
     t_load = time.time() - t0
-    stages = model.stage_table()
+    try:
+        stages = model.stage_table(**skip_kw)
+    except ValueError as e:
+        ap.error(str(e))
+    run_settings = {"hooks": hook_records, "skip_timesteps": args.skip_timesteps,
+                    **({"burn_skipped": False} if args.no_burn_skipped else {})}
 
     if not args.manifest:
         capture = [] if args.capture_tokens else None
         gen_states = []
-        imgs, raw, attention = model.sample([args.class_id], [args.seed], **capture_kw(capture), **hooks_kw(hooks),
+        imgs, raw, attention = model.sample([args.class_id], [args.seed], **capture_kw(capture), **sample_kw,
                                             gen_states=gen_states)
         t_sample = time.time() - t0 - t_load
         out = args.out or OUTPUTS_DIR / Path(cfg["_path"]).stem / rows[0].stem
@@ -191,7 +210,7 @@ def main(argv=None):
             "seed": args.seed,
             "attention": attention,
             "capture_tokens": args.capture_tokens,
-            "hooks": hook_records,
+            **run_settings,
             "generator_state_sha256": state_sha256(gen_states[0]),
             "seconds": {"load": round(t_load, 2), "sample": round(t_sample, 2)},
             "stages": stages,
@@ -209,7 +228,7 @@ def main(argv=None):
         capture = [] if args.capture_tokens else None
         gen_states = []
         imgs, raw, attention = model.sample([r.class_id for r in batch], [r.seed for r in batch],
-                                            **capture_kw(capture), **hooks_kw(hooks), gen_states=gen_states)
+                                            **capture_kw(capture), **sample_kw, gen_states=gen_states)
         t_sample += time.time() - t1
         for i, r in enumerate(batch):
             one_raw = raw[i:i + 1].clone()  # 1xCxHxW, own storage (a view would save the whole batch)
@@ -228,7 +247,7 @@ def main(argv=None):
         "batch_size": args.batch_size,
         "allow_partial_batch": args.allow_partial_batch,
         "capture_tokens": args.capture_tokens,
-        "hooks": hook_records,
+        **run_settings,
         "attention": attention,
         "seconds": {"load": round(t_load, 2), "sample": round(t_sample, 2)},
         "stages": stages,

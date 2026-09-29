@@ -28,7 +28,7 @@ CLASS_ID=207        # golden retriever
 SEED=0
 TIMING_BATCH_SIZES="1 16"
 TIMING_REPS=3
-VAR_CONFIG=configs/var_d20.yaml
+VAR_CONFIG=configs/var_d20_fp16.yaml   # historical fp16 settings (Phase 1-2b); configs/var_d20.yaml is now strict fp32
 DIT_CONFIG=configs/dit_xl2_256.yaml
 
 JOB="${PBS_JOBID%%.*}"

@@ -103,6 +103,14 @@ class VARScaleState(_State):
     MODIFIABLE: ClassVar[dict] = {"before": ("h_BChw", "f_hat"), "after": ("f_hat",)}
 
 
+@dataclass
+class DiTStepState(_State):
+    x: torch.Tensor = None            # conditional half of the latent (n, C, H, W); before: x_t, after: x_{t-1}
+    x_before: torch.Tensor = None     # after only: x_t as this step's model call received it, read-only
+    pred_xstart: torch.Tensor = None  # after only: predicted x_0 (conditional half), read-only
+    MODIFIABLE: ClassVar[dict] = {"before": ("x",), "after": ("x",)}
+
+
 def _same_bits(a, b) -> bool:
     if isinstance(a, torch.Tensor) or isinstance(b, torch.Tensor):
         if not (isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)):
