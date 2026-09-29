@@ -1,0 +1,88 @@
+#!/bin/bash
+#PBS -N phase1_check
+#PBS -P personal-gura0001
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o outputs/phase1_check/
+#
+# Phase 1 check on NSCC ASPIRE 2A. Submit from the repo root:
+#     qsub jobs/phase1_check.pbs
+# 1 GPU brings a fixed 16 CPUs / 110 GB. <=2 h walltime on 'normal' routes to the gdev queue.
+# Results: outputs/phase1_check/<job id>/summary.txt
+
+set -uo pipefail
+
+if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "ERROR: submit with 'qsub jobs/phase1_check.pbs'; never run GPU work on the login node." >&2
+    exit 1
+fi
+cd "$PBS_O_WORKDIR"
+if [[ ! -f runner/generate.py ]]; then
+    echo "ERROR: submit from the repo root (PBS_O_WORKDIR=$PBS_O_WORKDIR)." >&2
+    exit 1
+fi
+
+CLASS_ID=207        # golden retriever
+SEED=0
+TIMING_BATCH_SIZES="1 16"
+TIMING_REPS=3
+VAR_CONFIG=configs/var_d20.yaml
+DIT_CONFIG=configs/dit_xl2_256.yaml
+
+JOB="${PBS_JOBID%%.*}"
+OUT="outputs/phase1_check/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+module load miniforge3
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+
+: > "$OUT/steps.tsv"
+step() {   # step NAME CMD...: run, log exit code + duration, keep going
+    local name="$1"; shift
+    echo; echo "===== [$name] $*"
+    local t0=$SECONDS
+    "$@"
+    local rc=$?
+    printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >> "$OUT/steps.tsv"
+    echo "===== [$name] exit=$rc ($((SECONDS - t0))s)"
+    return $rc
+}
+finish() { python scripts/phase1/summarize.py "$OUT"; echo "Summary: $OUT/summary.txt"; }
+
+echo "job=$PBS_JOBID host=$(hostname) date=$(date -Is)"
+nvidia-smi | tee "$OUT/nvidia-smi.txt"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+
+if ! step gpu_check python scripts/phase1/gpu_check.py --out "$OUT/gpu.json"; then
+    echo "FATAL: no GPU visible to torch; stopping. See DIAGNOSIS in the summary."
+    finish
+    exit 2
+fi
+step third_party bash -c "python scripts/check_third_party.py > '$OUT/third_party.txt' 2>&1; rc=\$?; cat '$OUT/third_party.txt'; exit \$rc"
+
+# 1) Runner: one image per model, each in its own process.
+step runner_var python -m runner.generate --config "$VAR_CONFIG" --class-id $CLASS_ID --seed $SEED --out "$OUT/runner_var" --save-raw
+step runner_dit python -m runner.generate --config "$DIT_CONFIG" --class-id $CLASS_ID --seed $SEED --out "$OUT/runner_dit" --save-raw
+
+# 2) Official notebook code paths, separate processes, same class/seed/settings.
+step ref_var python scripts/phase1/ref_var_notebook.py --config "$VAR_CONFIG" --class-id $CLASS_ID --seed $SEED --out "$OUT/ref_var"
+step ref_dit python scripts/phase1/ref_dit_notebook.py --config "$DIT_CONFIG" --class-id $CLASS_ID --seed $SEED --out "$OUT/ref_dit"
+
+# 3) Equivalence (tensor hash + max pixel difference).
+step compare python scripts/phase1/compare.py --out "$OUT/equivalence.json" \
+    var_matched "$OUT/runner_var" "$OUT/ref_var_matched" \
+    var_asis    "$OUT/runner_var" "$OUT/ref_var_asis" \
+    dit_matched "$OUT/runner_dit" "$OUT/ref_dit_matched" \
+    dit_asis    "$OUT/runner_dit" "$OUT/ref_dit_asis"
+
+# 4) Timing + peak VRAM (DiT at the config's 250 steps), extrapolated to 1,000 images.
+step timing_var python scripts/phase1/timing.py --config "$VAR_CONFIG" --batch-sizes $TIMING_BATCH_SIZES --reps $TIMING_REPS --n-images 1000 --out "$OUT/timing_var.json"
+step timing_dit python scripts/phase1/timing.py --config "$DIT_CONFIG" --batch-sizes $TIMING_BATCH_SIZES --reps $TIMING_REPS --n-images 1000 --out "$OUT/timing_dit.json"
+
+step third_party_after python scripts/check_third_party.py
+finish

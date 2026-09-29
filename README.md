@@ -27,6 +27,36 @@ conda activate var-dit
 python scripts/check_third_party.py   # confirms submodules are pinned and clean
 ```
 
+On NSCC ASPIRE 2A, follow [docs/NSCC.md](docs/NSCC.md) instead of the commands below.
+
+## Checkpoints (run on the login node)
+
+```bash
+python scripts/download_checkpoints.py            # all configs/*.yaml (~5.9 GB)
+python scripts/download_checkpoints.py configs/var_d20.yaml
+```
+
+Standard library + PyYAML only (no torch/GPU). URLs and sha256 come from each config's `checkpoints:`
+section; Hugging Face files are pinned to a repo revision. Downloads resume; `HF_ENDPOINT` selects a mirror.
+
+| File | Size | Source |
+|---|---|---|
+| `checkpoints/var/var_d20.pth` | 2.4 GB | `FoundationVision/var` @ `6d0ee65` |
+| `checkpoints/var/vae_ch160v4096z32.pth` | 436 MB | `FoundationVision/var` @ `6d0ee65` |
+| `checkpoints/dit/DiT-XL-2-256x256.pt` | 2.7 GB | `dl.fbaipublicfiles.com` (no published hash; recorded in `.sha256`) |
+| `checkpoints/sd-vae-ft-ema/` | 335 MB | `stabilityai/sd-vae-ft-ema` @ `f04b2c4` |
+
+## Generating
+
+```bash
+python -m runner.generate --config configs/var_d20.yaml     --class-id 207 --seed 0
+python -m runner.generate --config configs/dit_xl2_256.yaml --class-id 207 --seed 0
+```
+
+One process loads exactly one model (`runner/upstream.py` refuses to mix repos). Output:
+`outputs/<config>/class<c>_seed<s>.png` plus a `.json` with the settings, attention backend, precision,
+versions and submodule SHAs. All sampler settings come from the config; missing keys are an error.
+
 ## Pinned upstream commits
 
 | Submodule | Commit | Date |
