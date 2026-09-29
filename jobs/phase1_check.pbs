@@ -37,7 +37,8 @@ mkdir -p "$OUT"
 exec > >(tee -a "$OUT/job.log") 2>&1
 
 set +u
-module load miniforge3
+module load miniforge3 
+module load git/2.39.2
 eval "$(conda shell.bash hook)"
 conda activate var-dit
 set -u
