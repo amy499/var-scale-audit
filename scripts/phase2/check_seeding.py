@@ -135,7 +135,9 @@ def main():
         runs = {}
         for tag, bs in [("bs4_a", 4), ("bs4_b", 4), ("bs1", 1), ("bs3", 3)]:
             out = work / "out" / name / tag
-            run("-m", "runner.generate", "--config", config, "--manifest", manifest, "--batch-size", bs, "--out-dir", out)
+            partial = ["--allow-partial-batch"] if tag == "bs3" else []   # bs3 leaves a partial last batch on purpose
+            run("-m", "runner.generate", "--config", config, "--manifest", manifest, "--batch-size", bs, "--out-dir", out,
+                *partial)
             rows = json.loads((out / "run.json").read_text())["rows"]
             runs[tag] = {r["file"]: r["tensor_sha256"] for r in rows}
         ref = work / "out" / name / "upstream_b1"

@@ -49,6 +49,23 @@ class DiTModel:
             "blocks_fused_attn": fused,
         }
 
+    def stage_table(self) -> list[dict]:
+        """Per-stage fields (docs/hook_interface.md §3), one per step j in sampling order.
+
+        Read from the schedule's numpy arrays only; independent of hooks and of the run's outputs.
+        """
+        d = self.diffusion
+        n = d.num_timesteps
+        table = []
+        for j, i in enumerate(range(n - 1, -1, -1)):
+            ab_in, ab_out = float(d.alphas_cumprod[i]), float(d.alphas_cumprod_prev[i])
+            table.append({"stage": int(d.timestep_map[i]), "p": j / (n - 1) if n > 1 else 1.0, "step": j,
+                          "timestep_in": int(d.timestep_map[i]),
+                          "timestep_out": int(d.timestep_map[i - 1]) if i > 0 else None,
+                          "alpha_bar_in": ab_in, "alpha_bar_out": ab_out,
+                          "sigma_in": (1.0 - ab_in) ** 0.5, "sigma_out": (1.0 - ab_out) ** 0.5})
+        return table
+
     def _p_sample_loop(self, sample_fn, z, model_kwargs, gens, using_cfg):
         """Upstream p_sample_loop (gaussian_diffusion.py, p_sample_loop_progressive + p_sample),
         except that each step's noise is drawn per row from that row's generator.
@@ -70,11 +87,13 @@ class DiTModel:
             img = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
         return img
 
-    def sample(self, class_ids: list[int], seeds: list[int]):
+    def sample(self, class_ids: list[int], seeds: list[int], gen_states: list | None = None):
         """One batch; row i is generated from seeds[i] only.
 
         Returns (BxHxWx3 uint8 images, raw decoded tensor on CPU, attention record).
         Mirrors the per-batch body of DiT sample_ddp.py (the FID script), with per-row noise.
+        gen_states: if a list, each row's generator state (Generator.get_state()) after the batch is
+          appended. Read after sampling; does not touch it.
         """
         if len(class_ids) != len(seeds):
             raise ValueError("class_ids and seeds must have the same length")
@@ -103,5 +122,7 @@ class DiTModel:
             if using_cfg:
                 samples, _ = samples.chunk(2, dim=0)
             samples = self.vae.decode(samples / 0.18215).sample
+        if gen_states is not None:
+            gen_states.extend(g.get_state() for g in gens)
         imgs = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
         return imgs, samples.cpu(), {**self.attention, "sdpa_kernel": sdpa}

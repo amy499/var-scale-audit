@@ -10,10 +10,16 @@ Every row of a manifest (see runner/manifest.py), in batches:
 
 Each image's randomness comes only from its own seed (one generator per row), so the
 output for a row does not depend on --batch-size or on the other rows in the manifest.
+The manifest size must be a multiple of --batch-size unless --allow-partial-batch is given.
+
+Hooks (runner/hooks.py, docs/hooks_quickstart.md): --hook path/to/file.py:NAME or --hook package.module:NAME,
+repeatable, where NAME is an Observe/Modify hook or a list of them. They are recorded in the output JSON.
 """
 
 import argparse
 import hashlib
+import importlib
+import importlib.util
 import json
 import sys
 import time
@@ -51,6 +57,41 @@ def capture_kw(capture: list | None) -> dict:
     return {} if capture is None else {"capture": capture}
 
 
+def hooks_kw(hooks: list) -> dict:
+    """Pass hooks only when some are registered, so the default call is exactly today's."""
+    return {"hooks": hooks} if hooks else {}
+
+
+def load_hooks(specs: list[str]) -> list:
+    """Each spec is FILE.py:NAME or MODULE:NAME; NAME is a Hook or a list/tuple of Hooks."""
+    from runner.hooks import Hook
+    hooks = []
+    for spec in specs:
+        target, sep, attr = spec.rpartition(":")
+        if not sep or not target or not attr:
+            raise ValueError(f"--hook {spec!r}: expected FILE.py:NAME or MODULE:NAME")
+        if target.endswith(".py"):
+            path = Path(target).resolve()
+            mod_spec = importlib.util.spec_from_file_location(f"_hooks_{path.stem}_{len(hooks)}", path)
+            if mod_spec is None:
+                raise ValueError(f"--hook {spec!r}: cannot load {path}")
+            mod = importlib.util.module_from_spec(mod_spec)
+            mod_spec.loader.exec_module(mod)
+        else:
+            mod = importlib.import_module(target)
+        obj = getattr(mod, attr)
+        items = list(obj) if isinstance(obj, (list, tuple)) else [obj]
+        for h in items:
+            if not isinstance(h, Hook):
+                raise ValueError(f"--hook {spec!r}: {h!r} is not an Observe/Modify hook")
+        hooks.extend(items)
+    return hooks
+
+
+def state_sha256(state: torch.Tensor) -> str:
+    return hashlib.sha256(state.cpu().numpy().tobytes()).hexdigest()
+
+
 def row_tokens(capture: list[dict], i: int, cfg: dict) -> dict:
     """Row i of a batch capture: per scale, that image's tensors (idx, top2_p, top2_i, p_chosen)."""
     return {"patch_nums": list(cfg["build"]["patch_nums"]),
@@ -77,6 +118,8 @@ def main(argv=None):
     ap.add_argument("--capture-tokens", action="store_true",
                     help="VAR only: also save each image's sampled token ids per scale as <stem>.tokens.pt "
                          "(read-only; outputs are unchanged)")
+    ap.add_argument("--hook", action="append", default=[], metavar="FILE.py:NAME|MODULE:NAME",
+                    help="register Observe/Modify hooks (repeatable; see runner/hooks.py)")
     one = ap.add_argument_group("one image")
     one.add_argument("--class-id", type=int)
     one.add_argument("--seed", type=int)
@@ -86,6 +129,8 @@ def main(argv=None):
     many.add_argument("--manifest", type=Path, help="generate every row of this manifest")
     many.add_argument("--batch-size", type=int, default=1, help="rows per model call (does not change the images)")
     many.add_argument("--out-dir", type=Path, help="default: outputs/<config>/<manifest name>")
+    many.add_argument("--allow-partial-batch", action="store_true",
+                      help="allow a manifest size that is not a multiple of --batch-size (smaller last batch)")
     args = ap.parse_args(argv)
 
     if args.manifest:
@@ -94,11 +139,14 @@ def main(argv=None):
         if args.batch_size < 1:
             ap.error("--batch-size must be >= 1")
         rows = load_manifest(args.manifest)
+        if len(rows) % args.batch_size and not args.allow_partial_batch:
+            ap.error(f"manifest has {len(rows)} rows, not a multiple of --batch-size {args.batch_size}; "
+                     "pass --allow-partial-batch to run a smaller last batch")
     else:
         if args.class_id is None or args.seed is None:
             ap.error("give --class-id and --seed, or --manifest")
-        if args.out_dir or args.batch_size != 1:
-            ap.error("--out-dir/--batch-size only apply with --manifest")
+        if args.out_dir or args.batch_size != 1 or args.allow_partial_batch:
+            ap.error("--out-dir/--batch-size/--allow-partial-batch only apply with --manifest")
         rows = [Row(args.class_id, args.seed)]
 
     cfg = load_config(args.config)
@@ -111,16 +159,24 @@ def main(argv=None):
 
     if args.capture_tokens and cfg["model"] != "var":
         ap.error("--capture-tokens is VAR only")
+    try:
+        hooks = load_hooks(args.hook)
+    except (ValueError, ImportError, AttributeError, OSError) as e:
+        ap.error(str(e))
+    hook_records = [h.record() for h in hooks]
 
     device = torch.device(cfg["device"])
     apply_precision(cfg["precision"])
     t0 = time.time()
     model = load_model(cfg)
     t_load = time.time() - t0
+    stages = model.stage_table()
 
     if not args.manifest:
         capture = [] if args.capture_tokens else None
-        imgs, raw, attention = model.sample([args.class_id], [args.seed], **capture_kw(capture))
+        gen_states = []
+        imgs, raw, attention = model.sample([args.class_id], [args.seed], **capture_kw(capture), **hooks_kw(hooks),
+                                            gen_states=gen_states)
         t_sample = time.time() - t0 - t_load
         out = args.out or OUTPUTS_DIR / Path(cfg["_path"]).stem / rows[0].stem
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -135,7 +191,10 @@ def main(argv=None):
             "seed": args.seed,
             "attention": attention,
             "capture_tokens": args.capture_tokens,
+            "hooks": hook_records,
+            "generator_state_sha256": state_sha256(gen_states[0]),
             "seconds": {"load": round(t_load, 2), "sample": round(t_sample, 2)},
+            "stages": stages,
         }
         out.with_suffix(".json").write_text(json.dumps(record, indent=2))
         print(f"wrote {out.with_suffix('.png')}  (attention: {attention['sdpa_kernel']['effective']})")
@@ -148,8 +207,9 @@ def main(argv=None):
         batch = rows[start:start + args.batch_size]
         t1 = time.time()
         capture = [] if args.capture_tokens else None
+        gen_states = []
         imgs, raw, attention = model.sample([r.class_id for r in batch], [r.seed for r in batch],
-                                            **capture_kw(capture))
+                                            **capture_kw(capture), **hooks_kw(hooks), gen_states=gen_states)
         t_sample += time.time() - t1
         for i, r in enumerate(batch):
             one_raw = raw[i:i + 1].clone()  # 1xCxHxW, own storage (a view would save the whole batch)
@@ -158,16 +218,20 @@ def main(argv=None):
             if capture is not None:
                 torch.save(row_tokens(capture, i, cfg), out_dir / f"{r.stem}.tokens.pt")
             results.append({"class_id": r.class_id, "seed": r.seed, "file": r.stem,
-                            "tensor_sha256": tensor_sha256(one_raw)})
+                            "tensor_sha256": tensor_sha256(one_raw),
+                            "generator_state_sha256": state_sha256(gen_states[i])})
         print(f"[{start + len(batch)}/{len(rows)}] rows done", flush=True)
 
     record = {
         **settings_record(cfg, device),
         "manifest": str(args.manifest.resolve()),
         "batch_size": args.batch_size,
+        "allow_partial_batch": args.allow_partial_batch,
         "capture_tokens": args.capture_tokens,
+        "hooks": hook_records,
         "attention": attention,
         "seconds": {"load": round(t_load, 2), "sample": round(t_sample, 2)},
+        "stages": stages,
         "rows": results,
     }
     (out_dir / "run.json").write_text(json.dumps(record, indent=2))
