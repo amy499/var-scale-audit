@@ -3,7 +3,7 @@
     python scripts/examples/run_examples.py [--work DIR]
 
 Each example is exactly the code shown in docs/hooks_quickstart.md or docs/HANDOVER.md (checked
-verbatim), run against tiny VAR/DiT models built like scripts/phase3/check_hooks.py's (10 VAR scales,
+verbatim; the HANDOVER.md checks are skipped if that file is not present), run against tiny VAR/DiT models built like scripts/phase3/check_hooks.py's (10 VAR scales,
 250 DiT steps) at batch 16 on manifest/provisional_4x4.csv. The PBS jobs run under bash with the
 config/hash overrides they accept; their real-weight hash checks can only pass on the GPU.
 Exit 1 if any check fails.
@@ -24,8 +24,9 @@ from pathlib import Path  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 EX = REPO / "scripts" / "examples"
 MANIFEST = REPO / "manifest" / "provisional_4x4.csv"
+HANDOVER = "docs/HANDOVER.md"
 DOCS = {"fhat_norm.py": "docs/hooks_quickstart.md", "skip_scale_2.py": "docs/hooks_quickstart.md",
-        "noise_hook.py": "docs/HANDOVER.md", "smoke.pbs": "docs/HANDOVER.md", "experiment.pbs": "docs/HANDOVER.md"}
+        "noise_hook.py": HANDOVER, "smoke.pbs": HANDOVER, "experiment.pbs": HANDOVER}
 RESULTS = {}
 
 
@@ -65,8 +66,13 @@ def main():
     work = (args.work or Path(tempfile.mkdtemp(prefix="examples_"))).resolve()
     work.mkdir(parents=True, exist_ok=True)
 
-    # 0. The docs show exactly these files.
+    # 0. The docs show exactly these files. docs/HANDOVER.md is kept out of git, so skip its checks if it's absent.
+    handover_missing = not (REPO / HANDOVER).exists()
+    if handover_missing:
+        print("skipped: HANDOVER.md not present", flush=True)
     for name, doc in DOCS.items():
+        if doc == HANDOVER and handover_missing:
+            continue
         body = text(EX / name).strip("\n")
         check(f"docs: {doc} shows scripts/examples/{name} verbatim", body in text(REPO / doc))
 

@@ -48,7 +48,7 @@ section; Hugging Face files are pinned to a repo revision. Downloads resume; `HF
 | `checkpoints/var/var_d24.pth` | 4.1 GB | `FoundationVision/var` @ `6d0ee65` (only with `--configs configs/var_d24.yaml` or `--all-var-depths`) |
 | `checkpoints/var/var_d16.pth`, `var_d30.pth` | 1.2 GB, 8.0 GB | `FoundationVision/var` @ `6d0ee65` (only if asked for; not in use) |
 | `checkpoints/var/vae_ch160v4096z32.pth` | 436 MB | `FoundationVision/var` @ `6d0ee65` (shared by every depth) |
-| `checkpoints/dit/DiT-XL-2-256x256.pt` | 2.7 GB | `dl.fbaipublicfiles.com` (no published hash; recorded in `.sha256`) |
+| `checkpoints/dit/DiT-XL-2-256x256.pt` | 2.7 GB | `dl.fbaipublicfiles.com` (no published hash upstream; sha256 pinned in `configs/dit_xl2_256.yaml` from P1's verified download) |
 | `checkpoints/sd-vae-ft-ema/` | 335 MB | `stabilityai/sd-vae-ft-ema` @ `f04b2c4` |
 
 ## Generating
