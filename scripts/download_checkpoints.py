@@ -1,9 +1,14 @@
-"""Download the checkpoints listed in configs/*.yaml into checkpoints/.
+"""Download the checkpoints a set of configs needs into checkpoints/.
 
 Meant for the cluster login node: standard library + PyYAML only (no torch, no GPU).
 
-    python scripts/download_checkpoints.py                         # every config in configs/
-    python scripts/download_checkpoints.py configs/var_d20.yaml    # just one
+    python scripts/download_checkpoints.py                                  # default: VAR-d20 + DiT
+    python scripts/download_checkpoints.py --configs configs/var_d24.yaml   # named configs
+    python scripts/download_checkpoints.py configs/var_d24.yaml             # same (positional form)
+    python scripts/download_checkpoints.py --all-var-depths                 # VAR d16, d20, d24, d30
+    python scripts/download_checkpoints.py --dry-run [...]                  # list files only
+
+Files shared by several configs (e.g. the VAR VQVAE) are fetched once.
 
 - Resumes interrupted downloads (<file>.part + HTTP Range).
 - Verifies sha256 when the config pins one; otherwise records it in <file>.sha256.
@@ -23,6 +28,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from runner.config import iter_downloads, load_config  # noqa: E402
 
 CHUNK = 8 << 20
+DEFAULT_CONFIGS = ("configs/var_d20.yaml", "configs/dit_xl2_256.yaml")   # the primary VAR depth and DiT
+VAR_DEPTH_CONFIGS = tuple(f"configs/var_d{d}.yaml" for d in (16, 20, 24, 30))
 
 
 def sha256_of(path: Path) -> str:
@@ -86,15 +93,27 @@ def ensure(dest: Path, url: str, expected: str | None) -> bool:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("configs", nargs="*", type=Path, help="config files (default: configs/*.yaml)")
+    ap.add_argument("positional", nargs="*", type=Path, metavar="CONFIG", help="config files (same as --configs)")
+    ap.add_argument("--configs", nargs="+", type=Path, default=[], help="config files to download for")
+    ap.add_argument("--all-var-depths", action="store_true", help="add " + ", ".join(VAR_DEPTH_CONFIGS))
+    ap.add_argument("--dry-run", action="store_true", help="list the files that would be checked or downloaded, then stop")
     args = ap.parse_args()
 
-    configs = args.configs or sorted((REPO_ROOT / "configs").glob("*.yaml"))
+    configs = [*args.positional, *args.configs]
+    if args.all_var_depths:
+        configs += [REPO_ROOT / c for c in VAR_DEPTH_CONFIGS]
+    if not configs:
+        configs = [REPO_ROOT / c for c in DEFAULT_CONFIGS]
+    print("configs: " + ", ".join(Path(c).as_posix() for c in configs))
     seen, ok = set(), True
     for cfg_path in configs:
         for dest, url, sha in iter_downloads(load_config(cfg_path)):
             if dest not in seen:
                 seen.add(dest)
+                if args.dry_run:
+                    rel = dest.relative_to(REPO_ROOT) if dest.is_relative_to(REPO_ROOT) else dest
+                    print(f"  {rel.as_posix()}{'  (exists)' if dest.exists() else ''}  <- {url}")
+                    continue
                 ok &= ensure(dest, url, sha)
     sys.exit(0 if ok else 1)
 

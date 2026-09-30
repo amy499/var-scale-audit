@@ -19,8 +19,8 @@
 #   2 baseline      no hooks, both models, batch 16 -> baseline_var/, baseline_dit/
 #     batch         VAR fp32 at batch 1 vs 16 on the manifest: rows identical, max pixel diff (measured)
 #     upstream      VAR fp32 runner at batch 1 vs plain upstream at B=1, all manifest rows (must be identical)
-#   3 regression    class 207 seed 0 at batch 1: VAR records its new fp32 hash (EXPECT_VAR=record) and the
-#                   no-op/observe-hook run must equal it; DiT must equal the Phase 1 hash with and without hooks
+#   3 regression    class 207 seed 0 at batch 1, with and without no-op/observe hooks: VAR must equal the
+#                   pinned d20 fp32 hash, DiT the Phase 1 hash
 #     hooks         scripts/phase3/check_hooks.py --configs real (tests a-e and doc tests 4-6, batch 16)
 # CPU-only results (VAR more_smooth, DiT without CFG) are listed at the end of the summary.
 
@@ -38,8 +38,9 @@ fi
 
 CLASS_ID=207        # golden retriever; Phase 1 regression image
 SEED=0
-EXPECT_VAR=record         # VAR strict fp32: no reference yet; this job records it (set the prefix once pinned).
-                          # The Phase 1 fp16 hash 48db2d9e166a no longer applies (see README).
+# VAR d20 strict fp32 tensor sha256, class 207 seed 0 (README "Reference hashes"). Set to `record` to
+# only record the hash. The Phase 1 fp16 hash 48db2d9e166a applies to configs/var_d20_fp16.yaml only.
+EXPECT_VAR=f16021ea827ab2ea38e70aab22b8e87d64a47f2c9bc8d6500fce72108cdef2c8
 EXPECT_DIT=2a3a0d6fbce9   # Phase 1 runner tensor sha256 (prefix), class 207 seed 0; DiT unchanged
 PIXEL_THRESHOLD=1.0       # grey levels (0-255): mean |pixel diff| above this = visibly different
 MANIFEST=manifest/provisional_4x4.csv
@@ -116,7 +117,7 @@ step upstream python scripts/phase2/compare_runs.py upstream --out "$OUT/upstrea
     var "$OUT/batch/var/bs1" "$OUT/upstream/var"
 
 # 3a) Regression at batch 1, class 207 seed 0, without hooks and with no-op Modify + Observe on both sides.
-#     VAR: record the fp32 hash; the hooked run must equal it. DiT: both must equal the Phase 1 hash.
+#     VAR: both must equal the pinned d20 fp32 hash (EXPECT_VAR). DiT: both must equal the Phase 1 hash.
 for m in var dit; do
     step regress_$m python -m runner.generate --config "$(config_for $m)" --class-id $CLASS_ID --seed $SEED \
         --out "$OUT/regression/$m" --save-raw

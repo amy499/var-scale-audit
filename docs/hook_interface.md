@@ -168,7 +168,7 @@ why this does not affect outputs).
 | `pn` | VAR | `patch_nums[si]` |
 | `n_tokens` | VAR | `pn²`, the tokens sampled at this scale |
 | `cum_tokens` | VAR | `sum(pn_i² for i ≤ si)`, tokens sampled through this scale |
-| `total_tokens` | VAR | `L = sum(pn²)` (680 for d20; 30 for the tiny test model) |
+| `total_tokens` | VAR | `L = sum(pn²)` (680 for every 256px VAR depth, d16 to d30, which all share `patch_nums` and so have 10 scales; 30 for the tiny test model) |
 | `timestep_in` | DiT | original timestep of the step's input, `diffusion.timestep_map[i]` |
 | `timestep_out` | DiT | original timestep of the step's output (next step's `timestep_in`); `None` for the last step, whose output is x_0 |
 | `alpha_bar_in` | DiT | ᾱ of the input latent: `diffusion.alphas_cumprod[i]` (`gaussian_diffusion.py:175`) |
@@ -180,7 +180,7 @@ are already the respaced schedule, so `alphas_cumprod[i]` is the base schedule's
 
 `p` is monotonic, starts at 0 and ends at 1, so "intervene at 30% of generation" means the same thing
 to code written for either model. It is not the only sensible axis:
-- VAR's `p` is uniform in scales, not tokens (the last scale alone is 256 of 680 tokens in d20);
+- VAR's `p` is uniform in scales, not tokens (the last scale alone is 256 of 680 tokens at 256px);
   `cum_tokens / total_tokens` is the token axis.
 - DiT's `p` is uniform in steps, not noise; `sigma_in` is the noise axis.
 

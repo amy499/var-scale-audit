@@ -22,6 +22,10 @@ class ConfigError(ValueError):
     pass
 
 
+class CheckpointMissing(ConfigError):
+    """A checkpoint file the config needs is not on disk. The message starts "checkpoint not downloaded"."""
+
+
 def resolve_path(p) -> Path:
     p = Path(p)
     return p if p.is_absolute() else REPO_ROOT / p
@@ -55,6 +59,26 @@ def load_config(path) -> dict:
 
     cfg["_path"] = str(path)
     return cfg
+
+
+def checkpoint_files(cfg: dict) -> list[Path]:
+    """Every local file (or directory, if its files are not listed) under [checkpoints]."""
+    out = []
+    for entry in cfg["checkpoints"].values():
+        root = resolve_path(entry["path"])
+        out += [root / f for f in entry["files"]] if "files" in entry else [root]
+    return out
+
+
+def require_checkpoints(cfg: dict):
+    """Raise CheckpointMissing, naming the files and the download command, if any checkpoint is absent."""
+    missing = [p for p in checkpoint_files(cfg) if not p.exists()]
+    if missing:
+        where = Path(cfg["_path"])
+        rel = where.relative_to(REPO_ROOT).as_posix() if where.is_relative_to(REPO_ROOT) else str(where)
+        raise CheckpointMissing(
+            f"checkpoint not downloaded: {', '.join(str(p) for p in missing)} "
+            f"(needed by {rel}; on the login node run: python scripts/download_checkpoints.py --configs {rel})")
 
 
 def iter_downloads(cfg: dict):

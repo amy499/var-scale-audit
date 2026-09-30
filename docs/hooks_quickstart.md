@@ -92,6 +92,19 @@ and compare against it.
   - VAR: cfg 1.5, top_k 900, top_p 0.96, `more_smooth: false`, **strict fp32** (autocast off, TF32
     off). Don't use `configs/var_d20_fp16.yaml`: it exists only for the historical fp16 jobs and a timing
     comparison.
+  - VAR depth: **d20 is the default and primary**. The other 256px depths have their own configs,
+    identical except the depth and checkpoint:
+
+    | Config | Depth | Params | Checkpoint | Status |
+    |---|---|---|---|---|
+    | `configs/var_d20.yaml` | 20 | 600M | 2.4 GB | default, primary |
+    | `configs/var_d24.yaml` | 24 | 1.0B | 4.1 GB | in use |
+    | `configs/var_d16.yaml` | 16 | 310M | 1.2 GB | not in use for now |
+    | `configs/var_d30.yaml` | 30 | 2.0B | 8.0 GB | not in use for now |
+
+    Every depth has the same 10 scales and 680 tokens, so hooks work unchanged. **Never mix depths
+    within a comparison**: the baseline and the hooked run use the same config. `run.json` records
+    the `depth`.
   - DiT: cfg_scale 1.5, 250 steps, fp32 with TF32.
   - Both: SDPA `math`, `cudnn_deterministic: true`.
 - **Batch size 16.** Compare only runs made at the same batch size: a different batch size changes
@@ -107,3 +120,7 @@ and compare against it.
   and under whatever autocast the config sets (none for either model now). Keep hooks cheap: DiT calls
   them 250 times per side per batch.
 - **Don't edit** `third_party/`.
+
+## Where your code goes
+
+Put your own code in lanes/pN/; don't edit runner/. If you need a change there, ask P1.

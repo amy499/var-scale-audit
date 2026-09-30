@@ -1,0 +1,151 @@
+#!/bin/bash
+#PBS -N phase3b_depths
+#PBS -P personal-gura0001
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o outputs/phase3b_depths/
+#
+# Phase 3b: VAR at several 256px depths on NSCC ASPIRE 2A. Submit from the repo root:
+#     qsub jobs/phase3b_depths.pbs                      # DEPTHS="20 24" (the depths in use)
+#     qsub -v DEPTHS="16 30" jobs/phase3b_depths.pbs    # others (download their checkpoints first)
+# Checkpoints (login node): python scripts/download_checkpoints.py --configs configs/var_d24.yaml
+# Results: outputs/phase3b_depths/<job id>/summary.txt
+#
+# Per depth, with configs/var_d<depth>.yaml (strict fp32; identical except depth and checkpoint):
+#   regression   class 207 seed 0 at batch 1: tensor hash recorded (d20: must equal the pinned d20 fp32 hash)
+#   upstream     runner at batch 1 vs plain upstream at B=1, all manifest rows (must be identical)
+#   hooks        batch 16: no-op Modify + Observe on both sides == no hooks; observer fires 10x per side
+#   timing       batch 16, 3 warm reps: time per 1,000 images and peak memory
+# Once: the depth check at load must reject configs/var_d16.yaml pointed at the d20 checkpoint.
+# Batch 16 for every depth, no fallback: out of memory is reported as "does not fit at batch 16".
+# A depth whose checkpoint file is missing is reported as "checkpoint not downloaded"; its steps are skipped.
+
+set -uo pipefail
+
+if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "ERROR: submit with 'qsub jobs/phase3b_depths.pbs'; never run GPU work on the login node." >&2
+    exit 1
+fi
+cd "$PBS_O_WORKDIR"
+if [[ ! -f runner/generate.py ]]; then
+    echo "ERROR: submit from the repo root (PBS_O_WORKDIR=$PBS_O_WORKDIR)." >&2
+    exit 1
+fi
+
+DEPTHS="${DEPTHS:-20 24}"   # d20 is the primary depth
+# Pinned batch-1 hashes (README "Reference hashes"); depths without one are recorded, not checked.
+EXPECT_D20=f16021ea827ab2ea38e70aab22b8e87d64a47f2c9bc8d6500fce72108cdef2c8
+CLASS_ID=207
+SEED=0
+MANIFEST=manifest/provisional_4x4.csv
+BATCH=16
+TIMING_REPS=3
+
+JOB="${PBS_JOBID%%.*}"
+OUT="outputs/phase3b_depths/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+
+: > "$OUT/steps.tsv"
+step() {   # step NAME CMD...: run, log exit code + duration, keep going
+    local name="$1"; shift
+    echo; echo "===== [$name] $*"
+    local t0=$SECONDS
+    "$@"
+    local rc=$?
+    printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >> "$OUT/steps.tsv"
+    echo "===== [$name] exit=$rc ($((SECONDS - t0))s)"
+    return $rc
+}
+not_downloaded() {   # not_downloaded NAME...: record steps skipped because a checkpoint is missing
+    for name in "$@"; do printf '%s\tcheckpoint not downloaded\t0\n' "$name" >> "$OUT/steps.tsv"; done
+}
+missing_of() {   # missing checkpoint files of a config, space-separated (empty if all present)
+    python -c 'import sys; from runner.config import load_config, checkpoint_files; print(" ".join(str(p) for p in checkpoint_files(load_config(sys.argv[1])) if not p.exists()))' "$1"
+}
+finish() { python scripts/phase3b/summarize.py "$OUT"; echo "Summary: $OUT/summary.txt"; }
+
+echo "job=$PBS_JOBID host=$(hostname) date=$(date -Is) DEPTHS=$DEPTHS"
+echo "$DEPTHS" > "$OUT/depths.txt"
+nvidia-smi | tee "$OUT/nvidia-smi.txt"
+
+if ! step gpu_check python scripts/phase1/gpu_check.py --out "$OUT/gpu.json"; then
+    echo "FATAL: no GPU visible to torch; stopping. See DIAGNOSIS in the summary."
+    finish
+    exit 2
+fi
+step third_party bash -c "python scripts/check_third_party.py > '$OUT/third_party.txt' 2>&1; rc=\$?; cat '$OUT/third_party.txt'; exit \$rc"
+
+# Negative case: configs/var_d16.yaml pointed at the d20 checkpoint must fail with the depth message.
+mkdir -p "$OUT/configs" "$OUT/depth_guard"
+GUARD_CFG="$OUT/configs/var_d16_with_d20_checkpoint.yaml"
+python - "$GUARD_CFG" <<'EOF'
+import sys, yaml
+c = yaml.safe_load(open("configs/var_d16.yaml"))
+c["checkpoints"]["var"] = yaml.safe_load(open("configs/var_d20.yaml"))["checkpoints"]["var"]
+open(sys.argv[1], "w").write(yaml.safe_dump(c, sort_keys=False))
+EOF
+guard() {
+    if python -m runner.generate --config "$GUARD_CFG" --class-id $CLASS_ID --seed $SEED --out "$OUT/depth_guard/run" \
+            2> "$OUT/depth_guard/stderr.txt"; then
+        echo "FAIL: the depth-16 config loaded the d20 checkpoint"; return 1
+    fi
+    grep -h "says VAR depth" "$OUT/depth_guard/stderr.txt"
+    grep -q "says VAR depth 16 .* has 20 blocks" "$OUT/depth_guard/stderr.txt"
+}
+missing="$(missing_of "$GUARD_CFG")"
+if [[ -z "$missing" ]]; then
+    step depth_guard guard
+else
+    echo "checkpoint not downloaded: $missing" | tee "$OUT/depth_guard/checkpoint_not_downloaded.txt"
+    not_downloaded depth_guard
+fi
+
+for d in $DEPTHS; do
+    cfg=configs/var_d$d.yaml
+    D="$OUT/d$d"
+    mkdir -p "$D"
+    if [[ ! -f "$cfg" ]]; then
+        echo "no config $cfg" | tee "$D/no_config.txt"
+        continue
+    fi
+    missing="$(missing_of "$cfg")"
+    if [[ -n "$missing" ]]; then
+        echo "d$d: checkpoint not downloaded: $missing (login node: python scripts/download_checkpoints.py --configs $cfg)" \
+            | tee "$D/checkpoint_not_downloaded.txt"
+        not_downloaded d${d}_regress d${d}_regression d${d}_bs1 d${d}_upstream_ref d${d}_upstream d${d}_hooks d${d}_timing
+        continue
+    fi
+    # Regression at batch 1: record the hash (d20: must equal the pinned one).
+    expect=record
+    [[ $d == 20 ]] && expect=$EXPECT_D20
+    step d${d}_regress python -m runner.generate --config "$cfg" --class-id $CLASS_ID --seed $SEED \
+        --out "$D/regression/var" --save-raw
+    step d${d}_regression python scripts/phase3/regression.py --out "$D/regression.json" \
+        var_d$d "$D/regression/var.pt" - $expect
+    # Runner at batch 1 vs plain upstream at B=1, every manifest row.
+    step d${d}_bs1 python -m runner.generate --config "$cfg" --manifest $MANIFEST --batch-size 1 --out-dir "$D/bs1"
+    step d${d}_upstream_ref python scripts/phase2/upstream_ref.py --config "$cfg" --manifest $MANIFEST \
+        --out-dir "$D/upstream"
+    step d${d}_upstream python scripts/phase2/compare_runs.py upstream --out "$D/upstream.json" \
+        var_d$d "$D/bs1" "$D/upstream"
+    # Hooks at batch 16: all no-op/observe hooks == no hooks; observer fires 10x per side.
+    step d${d}_hooks python scripts/phase3/check_hooks.py --config "$cfg" --quick --manifest $MANIFEST \
+        --work "$D/hooks"
+    # Timing and peak memory at batch 16.
+    step d${d}_timing python scripts/phase3b/timing_oom.py --config "$cfg" --batch-sizes $BATCH \
+        --reps $TIMING_REPS --n-images 1000 --out "$D/timing.json"
+done
+
+step third_party_after python scripts/check_third_party.py
+finish

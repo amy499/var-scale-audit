@@ -22,6 +22,20 @@ def load(d: Path, name: str):
         return None
 
 
+def config_label(path: str) -> str:
+    """e.g. "VAR-d20 strict fp32 (var_d20.yaml)", read from the config the run used."""
+    try:
+        import yaml
+        c = yaml.safe_load(Path(path).read_text())
+    except (OSError, ImportError, ValueError):
+        return Path(path).name
+    p = c["precision"]
+    prec = "strict fp32" if p["autocast_dtype"] is None and not p["tf32"] else \
+        (f"{p['autocast_dtype']} autocast" if p["autocast_dtype"] else "fp32 + TF32")
+    depth = f"-d{c['build']['depth']}" if c.get("model") == "var" else ""
+    return f"{c.get('model', '?').upper()}{depth} {prec} ({Path(path).name})"
+
+
 def main():
     d = Path(sys.argv[1])
     L = []
@@ -47,22 +61,23 @@ def main():
     w("-- third_party")
     w("  " + (tp.read_text().strip().replace("\n", "\n  ") if tp.exists() else "(missing)"))
 
-    w("-- 1. timing: VAR-d20, batch 16, 3 warm reps (GPU, real weights)")
-    for tag, label in (("fp32_strict", "strict fp32 (var_d20.yaml)"), ("fp16", "fp16 autocast (var_d20_fp16)")):
+    w("-- 1. timing: VAR, batch 16, 3 warm reps (GPU, real weights)")
+    for tag in ("fp32_strict", "fp16"):
         t = load(d, f"timing_var_{tag}.json")
         if not t:
-            w(f"  {label}: (missing timing_var_{tag}.json)")
+            w(f"  {tag}: (missing timing_var_{tag}.json)")
             continue
+        label = config_label(t["config"])
         b = t["batches"][0]
-        w(f"  {label:<30} {b['warm_mean_s']:.3f}s/batch (sd {b['warm_sd_s']:.3f})  "
+        w(f"  {label:<44} {b['warm_mean_s']:.3f}s/batch (sd {b['warm_sd_s']:.3f})  "
           f"per 1,000 images {b['extrapolated']['sampling_s']:.1f}s  peak alloc {b['peak_alloc_gib']} GiB  "
           f"peak reserved {b['peak_reserved_gib']} GiB  [{t['gpu']}]")
 
     w("-- 2. baseline dry run: no hooks, batch 16, provisional 4x4 manifest")
     for m in ("var", "dit"):
         r = load(d / f"baseline_{m}", "run.json")
-        w(f"  {m}: " + (f"{len(r['rows'])} rows, hooks={r['hooks']}, sample {r['seconds']['sample']}s -> baseline_{m}/"
-                        if r else "(missing run.json)"))
+        w(f"  {m}: " + (f"{config_label(r['config_path'])}: {len(r['rows'])} rows, hooks={r['hooks']}, "
+                        f"sample {r['seconds']['sample']}s -> baseline_{m}/" if r else "(missing run.json)"))
     r = load(d, "baseline_repeat.json")
     if r:
         for name, v in r.items():

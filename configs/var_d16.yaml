@@ -1,4 +1,5 @@
-# VAR-d20, ImageNet 256x256, class-conditional.
+# VAR-d16, ImageNet 256x256, class-conditional. Identical to configs/var_d20.yaml (the default and
+# primary depth) except build.depth and the VAR checkpoint. Never mix depths within a comparison.
 # Sampler settings match VAR README "FID evaluation":
 #   var.autoregressive_infer_cfg(..., cfg=1.5, top_p=0.96, top_k=900, more_smooth=False)
 model: var
@@ -10,12 +11,12 @@ checkpoints:   # paths are relative to the repo root; HF files pinned to a repo 
     url: https://huggingface.co/FoundationVision/var/resolve/6d0ee6598a42f75079aa79e58b012b57b284c91b/vae_ch160v4096z32.pth
     sha256: 7c3ec27ae28a3f87055e83211ea8cc8558bd1985d7b51742d074fb4c2fcf186c
   var:
-    path: checkpoints/var/var_d20.pth
-    url: https://huggingface.co/FoundationVision/var/resolve/6d0ee6598a42f75079aa79e58b012b57b284c91b/var_d20.pth
-    sha256: f7d232978e6fe82a4f2e0f5d82b012e01b1aa5abfe93ce2b56104ec0e878a10f
+    path: checkpoints/var/var_d16.pth
+    url: https://huggingface.co/FoundationVision/var/resolve/6d0ee6598a42f75079aa79e58b012b57b284c91b/var_d16.pth
+    sha256: 4f6151aad91c94e03e224dd7358d8389fa05301c0c291279566998efb54b0ecb
 
 build:   # kwargs for upstream models.build_vae_var (values from VAR demo_sample.ipynb)
-  depth: 20
+  depth: 16
   patch_nums: [1, 2, 3, 4, 5, 6, 8, 10, 13, 16]
   V: 4096
   Cvae: 32

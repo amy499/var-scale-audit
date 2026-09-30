@@ -32,17 +32,22 @@ On NSCC ASPIRE 2A, follow [docs/NSCC.md](docs/NSCC.md) instead of the commands b
 ## Checkpoints (run on the login node)
 
 ```bash
-python scripts/download_checkpoints.py            # all configs/*.yaml (~5.9 GB)
-python scripts/download_checkpoints.py configs/var_d20.yaml
+python scripts/download_checkpoints.py                                  # default: VAR-d20 + DiT (~5.9 GB)
+python scripts/download_checkpoints.py --configs configs/var_d24.yaml   # named configs (also: positional paths)
+python scripts/download_checkpoints.py --all-var-depths                 # VAR d16, d20, d24, d30
+python scripts/download_checkpoints.py --dry-run [...]                  # list the files only
 ```
 
 Standard library + PyYAML only (no torch/GPU). URLs and sha256 come from each config's `checkpoints:`
 section; Hugging Face files are pinned to a repo revision. Downloads resume; `HF_ENDPOINT` selects a mirror.
+`scripts/nscc/setup_login.sh` downloads the default set.
 
 | File | Size | Source |
 |---|---|---|
 | `checkpoints/var/var_d20.pth` | 2.4 GB | `FoundationVision/var` @ `6d0ee65` |
-| `checkpoints/var/vae_ch160v4096z32.pth` | 436 MB | `FoundationVision/var` @ `6d0ee65` |
+| `checkpoints/var/var_d24.pth` | 4.1 GB | `FoundationVision/var` @ `6d0ee65` (only with `--configs configs/var_d24.yaml` or `--all-var-depths`) |
+| `checkpoints/var/var_d16.pth`, `var_d30.pth` | 1.2 GB, 8.0 GB | `FoundationVision/var` @ `6d0ee65` (only if asked for; not in use) |
+| `checkpoints/var/vae_ch160v4096z32.pth` | 436 MB | `FoundationVision/var` @ `6d0ee65` (shared by every depth) |
 | `checkpoints/dit/DiT-XL-2-256x256.pt` | 2.7 GB | `dl.fbaipublicfiles.com` (no published hash; recorded in `.sha256`) |
 | `checkpoints/sd-vae-ft-ema/` | 335 MB | `stabilityai/sd-vae-ft-ema` @ `f04b2c4` |
 
@@ -71,6 +76,28 @@ size; across batch sizes they can differ by float rounding (~1e-5 on CPU; see
 
 Hooks (read or change the model's state at every sampling stage): see `docs/hooks_quickstart.md`.
 
+A config whose checkpoint file is missing stops with "checkpoint not downloaded: <file> ..." and the
+download command, not a traceback.
+
+## VAR depths
+
+Every 256px VAR depth has a config. They are identical (strict fp32, same sampler, same VQVAE, same
+10 scales and 680 tokens per image) except `build.depth` and the VAR checkpoint:
+
+| Config | Depth | Params | Checkpoint | Status |
+|---|---|---|---|---|
+| `configs/var_d20.yaml` | 20 | 600M | 2.4 GB | **Default and primary** |
+| `configs/var_d24.yaml` | 24 | 1.0B | 4.1 GB | In use |
+| `configs/var_d16.yaml` | 16 | 310M | 1.2 GB | Available, not downloaded or run for now |
+| `configs/var_d30.yaml` | 30 | 2.0B | 8.0 GB | Available, not downloaded or run for now |
+
+- **Never mix depths within a comparison**: a baseline and the run compared with it use the same config.
+- At load, the runner checks that the checkpoint's block count and width match the config's depth and
+  stops with a message naming both if not. `run.json` records `depth` and what the checkpoint contained.
+- `jobs/phase3b_depths.pbs` checks each depth on the GPU (`DEPTHS="20 24"` by default).
+- VAR's README also lists "VAR-d30-re": the same `var_d30.pth` with a different sampling procedure,
+  which this runner does not implement.
+
 ## Precision and reference hashes
 
 From Phase 3, VAR runs in **strict fp32**: `configs/var_d20.yaml` has autocast off and TF32 off.
@@ -79,13 +106,18 @@ DiT is unchanged (fp32 with TF32). The previous VAR settings (fp16 autocast with
 Phase 1-2b jobs (below) and by the fp16 side of the timing comparison in `jobs/phase3_check.pbs`;
 experiments use `configs/var_d20.yaml`.
 
-Reference tensor hashes (sha256 prefix of the raw output, class 207 seed 0, batch 1, on the GPU):
+Reference tensor hashes (sha256 of the raw output, class 207 seed 0, batch 1, on the GPU):
 
-| Model | Precision | Hash | Status |
+| Name | Config | Hash | Status |
 |---|---|---|---|
-| VAR-d20 | fp16 autocast + TF32 (`var_d20_fp16.yaml`) | `48db2d9e166a` | Historical: Phase 1-2b |
-| VAR-d20 | strict fp32 (`var_d20.yaml`) | not yet recorded | Recorded by the first `jobs/phase3_check.pbs` run, which also checks runner = plain upstream at batch 1 in fp32 (all 16 manifest rows); pin it here and as `EXPECT_VAR` in that job |
-| DiT-XL/2 | fp32 + TF32 (`dit_xl2_256.yaml`) | `2a3a0d6fbce9` | Current |
+| VAR d20 fp32 | `var_d20.yaml` | `f16021ea827ab2ea38e70aab22b8e87d64a47f2c9bc8d6500fce72108cdef2c8` | Current; checked as `EXPECT_VAR` in `jobs/phase3_check.pbs` |
+| VAR d24 fp32 | `var_d24.yaml` | not yet recorded | Fill in from the first `jobs/phase3b_depths.pbs` run (`d24/regression.json`) |
+| VAR d16 fp32 | `var_d16.yaml` | not recorded | Not in use |
+| VAR d30 fp32 | `var_d30.yaml` | not recorded | Not in use |
+| VAR d20 fp16 | `var_d20_fp16.yaml` | `48db2d9e166a` (prefix) | Historical: Phase 1-2b |
+| DiT-XL/2 | `dit_xl2_256.yaml` (fp32 + TF32) | `2a3a0d6fbce9` (prefix) | Current |
+
+`jobs/phase3b_depths.pbs` also records the d20 hash; it must equal the "VAR d20 fp32" row.
 
 **Historical jobs.** `jobs/phase1_check.pbs`, `jobs/phase2_check.pbs` and `jobs/phase2b_tokens.pbs`
 were run with the fp16 VAR settings and expect the fp16 hash. Their `VAR_CONFIG` now defaults to

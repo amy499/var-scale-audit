@@ -2,6 +2,13 @@
 
     python scripts/phase3/check_hooks.py --configs tiny [--work DIR]    # CPU, random tiny weights
     python scripts/phase3/check_hooks.py --configs real [--work DIR]    # configs/*.yaml (GPU node)
+    python scripts/phase3/check_hooks.py --config configs/var_d24.yaml [--config ...] --quick [--work DIR]
+
+--config PATH (repeatable) runs those configs instead, with real weights. --quick runs only the
+baseline and one run with every no-op/observe hook: test a (all together) and test b.
+Expected stage counts come from each config: VAR len(patch_nums) scales (10 for every 256px depth,
+680 tokens), DiT num_sampling_steps (250). A config whose checkpoint is missing is reported as
+"checkpoint not downloaded"; a CUDA out-of-memory failure is reported as such.
 
 tiny: builds random-weight VAR and DiT in checkpoints/tiny/ with the real stage structure (VAR-d20's
 patch_nums, so 10 scales; DiT with the real config's 250 steps), then tests var_tiny, var_tiny_smooth,
@@ -43,7 +50,16 @@ TINY_DIR = REPO / "checkpoints" / "tiny"
 REAL = {"var_d20": REPO / "configs" / "var_d20.yaml", "dit_xl2_256": REPO / "configs" / "dit_xl2_256.yaml"}
 TINY = ("var_tiny", "var_tiny_smooth", "dit_tiny", "dit_tiny_nocfg")
 BATCH = 16
-EXPECTED_STAGES = {"var": 10, "dit": 250}
+
+
+def config_info(config: Path) -> dict:
+    """model, expected stages per side (VAR scales, DiT steps), VAR depth and token count, from the config."""
+    import yaml
+    c = yaml.safe_load(config.read_text())
+    if c["model"] == "var":
+        pn = c["build"]["patch_nums"]
+        return {"model": "var", "stages": len(pn), "depth": c["build"]["depth"], "total_tokens": sum(p * p for p in pn)}
+    return {"model": "dit", "stages": int(c["sampler"]["num_sampling_steps"])}
 VAR_K = 3                  # destructive / round-trip scale
 VAR_SKIP_SCALES = (2, 8)
 DIT_J = 125                # destructive / hold / skip step index j (baseline schedule)
@@ -112,6 +128,7 @@ def coefficients(config: Path, tau: int) -> dict:
 class Runner:
     def __init__(self, work: Path, manifest: Path):
         self.work, self.manifest = work, manifest
+        self.oom, self.missing = [], []   # runs that hit CUDA out of memory / a missing checkpoint
 
     def gen(self, cfg_name: str, config: Path, tag: str, hooks=(), extra=(), stage=None) -> dict:
         out = self.work / cfg_name / tag
@@ -129,6 +146,10 @@ class Runner:
         print(f"  [{cfg_name}] {tag}", flush=True)
         p = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True, text=True)
         (out / "stderr.txt").write_text(p.stderr, encoding="utf-8")
+        if "OutOfMemoryError" in p.stderr or "CUDA out of memory" in p.stderr:
+            self.oom.append(f"{cfg_name}/{tag}")
+        if "checkpoint not downloaded" in p.stderr:
+            self.missing.append(f"{cfg_name}/{tag}")
         run = json.loads((out / "run.json").read_text()) if p.returncode == 0 and (out / "run.json").exists() else None
         calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
         return {"rc": p.returncode, "stderr": p.stderr[-3000:], "run": run, "calls": calls, "dir": out}
@@ -229,12 +250,25 @@ def check_order_and_fields(c: Checks, model: str, run: dict, expected_n: int):
         c.measured["dtypes seen by hooks"] = sorted({f"{k}:{v['dtype']}" for x in calls for k, v in x["tensors"].items()})
 
 
-def test_var(R: Runner, name: str, config: Path) -> Checks:
+def quick(c: Checks, R: Runner, name: str, config: Path, base: dict) -> Checks:
+    """Test a (every no-op/observe hook together == no hooks) and test b (firing count, order, fields)."""
+    info = config_info(config)
+    run = R.gen(name, config, "all", ["noop_before", "noop_after", "observe"])
+    c.same_as("a all together (noop Modify before+after, Observe before+after) == no hooks", run, base)
+    if run["rc"] == 0:
+        check_order_and_fields(c, info["model"], run, info["stages"])
+    return c
+
+
+def test_var(R: Runner, name: str, config: Path, quick_only: bool = False) -> Checks:
     c = Checks()
     base = R.gen(name, config, "base")
     if base["rc"]:
         c.check("baseline run", False, base["stderr"][-400:])
         return c
+    if quick_only:
+        return quick(c, R, name, config, base)
+    n_stages = config_info(config)["stages"]
     # a
     obs = R.gen(name, config, "observe", ["observe"])
     c.same_as("a noop Modify before", R.gen(name, config, "noop_before", ["noop_before"]), base)
@@ -247,7 +281,7 @@ def test_var(R: Runner, name: str, config: Path) -> Checks:
     c.same_as("a capture on + all hooks == baseline", cap_hooks, base)
     c.check("a capture on: tokens identical with and without hooks", tokens_equal(cap_base, cap_hooks))
     # b
-    check_order_and_fields(c, "var", obs, EXPECTED_STAGES["var"])
+    check_order_and_fields(c, "var", obs, n_stages)
     # c
     row0 = R.gen(name, config, "row0", ["row0_after", "observe"], stage=VAR_K)
     c.check("c row 0 changed", row0["rc"] == 0 and row_hashes(row0)[0] != row_hashes(base)[0])
@@ -271,7 +305,7 @@ def test_var(R: Runner, name: str, config: Path) -> Checks:
                  "phase3 deliberate hook failure")
     # e
     c.fails_with("e hook on a stage that does not exist", R.gen(name, config, "bad_stage", ["observe_at_stage"],
-                                                                stage=EXPECTED_STAGES["var"]),
+                                                                stage=n_stages),
                  "which this run does not have")
     return c
 
@@ -291,12 +325,14 @@ def tokens_equal(a: dict, b: dict) -> bool:
     return True
 
 
-def test_dit(R: Runner, name: str, config: Path) -> Checks:
+def test_dit(R: Runner, name: str, config: Path, quick_only: bool = False) -> Checks:
     c = Checks()
     base = R.gen(name, config, "base")
     if base["rc"]:
         c.check("baseline run", False, base["stderr"][-400:])
         return c
+    if quick_only:
+        return quick(c, R, name, config, base)
     stages = [s["stage"] for s in base["run"]["stages"]]
     tau_j, tau_0 = stages[DIT_J], stages[0]
     # a
@@ -306,7 +342,7 @@ def test_dit(R: Runner, name: str, config: Path) -> Checks:
     c.same_as("a Observe before+after", obs, base)
     c.same_as("a all together", R.gen(name, config, "all", ["noop_before", "noop_after", "observe"]), base)
     # b
-    check_order_and_fields(c, "dit", obs, EXPECTED_STAGES["dit"])
+    check_order_and_fields(c, "dit", obs, config_info(config)["stages"])
     # c
     row0 = R.gen(name, config, "row0", ["row0_after"], stage=tau_j)
     c.check("c row 0 changed", row0["rc"] == 0 and row_hashes(row0)[0] != row_hashes(base)[0])
@@ -378,6 +414,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--configs", choices=("tiny", "real"), default="tiny")
     ap.add_argument("--only", nargs="+", help="config names to run (default: all for --configs)")
+    ap.add_argument("--config", action="append", type=Path, default=[],
+                    help="run this config file instead (repeatable; real weights; overrides --configs)")
+    ap.add_argument("--quick", action="store_true", help="only test a (all hooks together) and test b")
     ap.add_argument("--manifest", type=Path, default=REPO / "manifest" / "provisional_4x4.csv")
     ap.add_argument("--work", type=Path, help="output dir (default: a new temp dir)")
     ap.add_argument("--make-tiny", nargs=2, metavar=("REPO", "DIR"), help=argparse.SUPPRESS)
@@ -391,8 +430,10 @@ def main():
 
     work = (args.work or Path(tempfile.mkdtemp(prefix="check_hooks_"))).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    real = args.configs == "real"
-    if real:
+    real = args.configs == "real" or bool(args.config)
+    if args.config:
+        configs = {Path(p).stem: Path(p).resolve() for p in args.config}
+    elif real:
         configs = dict(REAL)
     else:
         TINY_DIR.mkdir(parents=True, exist_ok=True)
@@ -406,9 +447,16 @@ def main():
     R = Runner(work, args.manifest.resolve())
     report, ok = {}, True
     for name, config in configs.items():
-        test = test_var if name.startswith("var") else test_dit
-        c = test(R, name, config)
-        report[name] = {"label": label(config, real), "config": str(config), "batch_size": BATCH,
+        info = config_info(config)
+        test = test_var if info["model"] == "var" else test_dit
+        c = test(R, name, config, args.quick)
+        mine = lambda runs: [r for r in runs if r.startswith(f"{name}/")]  # noqa: E731
+        if info["model"] == "var":
+            c.measured["total tokens per image (from config patch_nums)"] = info["total_tokens"]
+        report[name] = {"label": label(config, real), "config": str(config), "model": info["model"],
+                        **({"depth": info["depth"]} if "depth" in info else {}),
+                        "batch_size": BATCH, "expected_stages_per_side": info["stages"], "quick": args.quick,
+                        "checkpoint_not_downloaded": bool(mine(R.missing)), "out_of_memory": mine(R.oom),
                         "checks": c.results, "measured": c.measured}
         ok &= all(v["pass"] for v in c.results.values())
     (work / "report.json").write_text(json.dumps(report, indent=2))
@@ -416,7 +464,10 @@ def main():
     print()
     for name, rep in report.items():
         n_ok = sum(v["pass"] for v in rep["checks"].values())
-        print(f"{name}  [{rep['label']}]  {n_ok}/{len(rep['checks'])} checks pass")
+        status = (" CHECKPOINT NOT DOWNLOADED" if rep["checkpoint_not_downloaded"] else "") + (
+            f" CUDA OUT OF MEMORY at batch {BATCH}: {rep['out_of_memory']}" if rep["out_of_memory"] else "")
+        print(f"{name}  [{rep['label']}{', depth ' + str(rep['depth']) if 'depth' in rep else ''}]  "
+              f"{n_ok}/{len(rep['checks'])} checks pass{status}")
         for check, v in rep["checks"].items():
             print(f"    {'PASS' if v['pass'] else 'FAIL'}  {check}" + ("" if v["pass"] else f"   {v.get('detail')}"))
         for k, v in rep["measured"].items():

@@ -33,8 +33,10 @@ import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from runner import OUTPUTS_DIR  # noqa: E402
-from runner.config import load_config  # noqa: E402
+from runner.config import CheckpointMissing, ConfigError, load_config, require_checkpoints  # noqa: E402
 from runner.manifest import Row, load_manifest  # noqa: E402
+
+EXIT_CHECKPOINT_MISSING = 4   # a config's checkpoint file is not on disk ("checkpoint not downloaded")
 from runner.runtime import apply_precision, effective_precision, environment_record  # noqa: E402
 
 
@@ -100,10 +102,14 @@ def row_tokens(capture: list[dict], i: int, cfg: dict) -> dict:
             "scales": [{k: v[i].clone() for k, v in scale.items()} for scale in capture]}
 
 
-def settings_record(cfg: dict, device: torch.device) -> dict:
+def settings_record(cfg: dict, device: torch.device, model=None) -> dict:
+    """model: the loaded model; for VAR adds the depth and what the checkpoint was checked to contain."""
+    depth = ({"depth": cfg["build"]["depth"], "depth_check": model.depth_record}
+             if cfg["model"] == "var" and model is not None else {})
     return {
         "model": cfg["model"],
         "config_path": cfg["_path"],
+        **depth,
         "device": str(device),
         "sampler": cfg["sampler"],
         "build": cfg["build"],
@@ -159,6 +165,11 @@ def main(argv=None):
     cfg = load_config(args.config)
     if args.device:
         cfg["device"] = args.device
+    try:
+        require_checkpoints(cfg)
+    except CheckpointMissing as e:   # a clear one-line message, no traceback
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(EXIT_CHECKPOINT_MISSING)
     num_classes = cfg["build"]["num_classes"]
     bad = [r for r in rows if not 0 <= r.class_id < num_classes]
     if bad:
@@ -182,7 +193,11 @@ def main(argv=None):
     device = torch.device(cfg["device"])
     apply_precision(cfg["precision"])
     t0 = time.time()
-    model = load_model(cfg)
+    try:
+        model = load_model(cfg)
+    except ConfigError as e:   # e.g. a checkpoint of another VAR depth: one clear line, no traceback
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
     t_load = time.time() - t0
     try:
         stages = model.stage_table(**skip_kw)
@@ -205,7 +220,7 @@ def main(argv=None):
         if capture is not None:
             torch.save(row_tokens(capture, 0, cfg), out.with_suffix(".tokens.pt"))
         record = {
-            **settings_record(cfg, device),
+            **settings_record(cfg, device, model),
             "class_id": args.class_id,
             "seed": args.seed,
             "attention": attention,
@@ -242,7 +257,7 @@ def main(argv=None):
         print(f"[{start + len(batch)}/{len(rows)}] rows done", flush=True)
 
     record = {
-        **settings_record(cfg, device),
+        **settings_record(cfg, device, model),
         "manifest": str(args.manifest.resolve()),
         "batch_size": args.batch_size,
         "allow_partial_batch": args.allow_partial_batch,

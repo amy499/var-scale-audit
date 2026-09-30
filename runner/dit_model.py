@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from runner import upstream
-from runner.config import resolve_path
+from runner.config import require_checkpoints, resolve_path
 from runner.hooks import DiTStepState, Hook, HookError, check_hooks, has_point, run_point
 from runner.runtime import autocast_ctx, row_generators, sdpa_ctx, sdpa_record
 
@@ -36,6 +36,7 @@ class DiTModel:
             upstream.check_origin(mod, "dit")
 
         self.cfg = cfg
+        require_checkpoints(cfg)
         self.device = torch.device(cfg["device"])
         b = cfg["build"]
         self.latent_size = b["image_size"] // 8

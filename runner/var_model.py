@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from runner import upstream
-from runner.config import ConfigError, resolve_path
+from runner.config import ConfigError, require_checkpoints, resolve_path
 from runner.hooks import VARScaleState, check_hooks, has_point, run_point, var_stage_table
 from runner.runtime import autocast_ctx, row_generators, sdpa_ctx, sdpa_record
 
@@ -35,6 +35,7 @@ class VARModel:
         self._var_module = var_module
 
         self.cfg = cfg
+        require_checkpoints(cfg)
         self.device = torch.device(cfg["device"])
         # VAR.__init__ creates its sampling Generator on dist.get_device() (cuda if available).
         if torch.device(var_dist.get_device()).type != self.device.type:
@@ -51,7 +52,10 @@ class VARModel:
         )
         ckpts = cfg["checkpoints"]
         self.vae.load_state_dict(torch.load(resolve_path(ckpts["vae"]["path"]), map_location="cpu"), strict=True)
-        self.var.load_state_dict(torch.load(resolve_path(ckpts["var"]["path"]), map_location="cpu"), strict=True)
+        var_sd = torch.load(resolve_path(ckpts["var"]["path"]), map_location="cpu")
+        self.depth_record = self._check_depth(var_sd, cfg["build"]["depth"], ckpts["var"]["path"])
+        self.var.load_state_dict(var_sd, strict=True)
+        del var_sd
         for m in (self.vae, self.var):
             m.eval()
             m.requires_grad_(False)
@@ -64,6 +68,26 @@ class VARModel:
                 or "get_next_autoregressive_input" in vars(quant):
             raise RuntimeError("var.vae_quant_proxy[0] is not the upstream VectorQuantizer2 of self.vae; upstream changed")
         self.patch_nums = tuple(build["patch_nums"])
+
+    def _check_depth(self, sd: dict, depth: int, path) -> dict:
+        """Fail clearly if the VAR checkpoint does not have the config's depth.
+
+        Checkpoint depth = its number of transformer blocks; width = word_embed's output size
+        (build_vae_var uses width = 64 * depth). Both must equal the model built from the config.
+        load_state_dict(strict=True) afterwards still checks every other parameter.
+        """
+        blocks = {int(k.split(".")[1]) for k in sd if k.startswith("blocks.")}
+        ck_blocks = max(blocks) + 1 if blocks else 0
+        w = sd.get("word_embed.weight")
+        ck_width = int(w.shape[0]) if w is not None else None
+        n_blocks, width = len(self.var.blocks), int(self.var.word_embed.weight.shape[0])
+        if blocks != set(range(ck_blocks)) or ck_blocks != n_blocks or ck_width != width:
+            raise ConfigError(
+                f"{self.cfg['_path']} says VAR depth {depth} ({n_blocks} blocks, width {width}), but the checkpoint "
+                f"{path} has {ck_blocks} blocks and width {ck_width}"
+                + (f", i.e. it is a VAR-d{ck_blocks} checkpoint" if ck_width == 64 * ck_blocks else "")
+                + ". Use the config that matches the checkpoint (configs/var_d<depth>.yaml).")
+        return {"config_depth": depth, "checkpoint_blocks": ck_blocks, "checkpoint_width": ck_width}
 
     def stage_table(self) -> list[dict]:
         """Per-stage fields (docs/hook_interface.md §3); independent of hooks and of the run's outputs."""
