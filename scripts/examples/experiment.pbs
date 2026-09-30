@@ -1,0 +1,38 @@
+#!/bin/bash
+#PBS -N pN_experiment
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o outputs/pN/pbs/
+# Baseline + intervention job (docs/HANDOVER.md 5). Copy to lanes/pN/jobs/, replace N and the hook, and
+# submit from the repo root with your own project:  qsub -P <your-project-id> lanes/pN/jobs/experiment.pbs
+# The baseline and every intervention use the same config, manifest and batch size (16).
+set -uo pipefail
+[[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
+cd "$PBS_O_WORKDIR"
+[[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
+
+VAR_CONFIG="${VAR_CONFIG:-configs/var_d20.yaml}"
+DIT_CONFIG="${DIT_CONFIG:-configs/dit_xl2_256.yaml}"
+MANIFEST="${MANIFEST:-manifest/provisional_4x4.csv}"   # switch to P3's frozen manifest once it exists
+HOOK="${HOOK:-scripts/examples/noise_hook.py:noise_scale_3}"   # your lane's hook, e.g. lanes/p2/hooks.py:NAME
+JOB="${PBS_JOBID%%.*}"
+OUT="${OUT_ROOT:-outputs/pN}/experiment/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+
+python -m runner.generate --config "$VAR_CONFIG" --manifest "$MANIFEST" --batch-size 16 \
+    --out-dir "$OUT/var/baseline"
+python -m runner.generate --config "$VAR_CONFIG" --manifest "$MANIFEST" --batch-size 16 \
+    --out-dir "$OUT/var/intervention" --hook "$HOOK"
+python -m runner.generate --config "$DIT_CONFIG" --manifest "$MANIFEST" --batch-size 16 \
+    --out-dir "$OUT/dit/baseline"

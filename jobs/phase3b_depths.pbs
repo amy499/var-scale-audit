@@ -14,7 +14,7 @@
 # Results: outputs/phase3b_depths/<job id>/summary.txt
 #
 # Per depth, with configs/var_d<depth>.yaml (strict fp32; identical except depth and checkpoint):
-#   regression   class 207 seed 0 at batch 1: tensor hash recorded (d20: must equal the pinned d20 fp32 hash)
+#   regression   class 207 seed 0 at batch 1: tensor hash (d20, d24: must equal the pinned fp32 hash; others recorded)
 #   upstream     runner at batch 1 vs plain upstream at B=1, all manifest rows (must be identical)
 #   hooks        batch 16: no-op Modify + Observe on both sides == no hooks; observer fires 10x per side
 #   timing       batch 16, 3 warm reps: time per 1,000 images and peak memory
@@ -37,6 +37,7 @@ fi
 DEPTHS="${DEPTHS:-20 24}"   # d20 is the primary depth
 # Pinned batch-1 hashes (README "Reference hashes"); depths without one are recorded, not checked.
 EXPECT_D20=f16021ea827ab2ea38e70aab22b8e87d64a47f2c9bc8d6500fce72108cdef2c8
+EXPECT_D24=8fb51f70f053c62d9dd2a7bc42a4611baa74c3ee728cd5c05a922ce9e4a3ecfe
 CLASS_ID=207
 SEED=0
 MANIFEST=manifest/provisional_4x4.csv
@@ -126,9 +127,12 @@ for d in $DEPTHS; do
         not_downloaded d${d}_regress d${d}_regression d${d}_bs1 d${d}_upstream_ref d${d}_upstream d${d}_hooks d${d}_timing
         continue
     fi
-    # Regression at batch 1: record the hash (d20: must equal the pinned one).
-    expect=record
-    [[ $d == 20 ]] && expect=$EXPECT_D20
+    # Regression at batch 1: must equal the pinned hash where there is one (d20, d24); otherwise recorded.
+    case $d in
+        20) expect=$EXPECT_D20 ;;
+        24) expect=$EXPECT_D24 ;;
+        *)  expect=record ;;
+    esac
     step d${d}_regress python -m runner.generate --config "$cfg" --class-id $CLASS_ID --seed $SEED \
         --out "$D/regression/var" --save-raw
     step d${d}_regression python scripts/phase3/regression.py --out "$D/regression.json" \

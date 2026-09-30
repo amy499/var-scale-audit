@@ -34,17 +34,26 @@ handles the CFG copies.
 ## An observe hook
 
 Returns `None`. It gets copies, so it cannot change anything. This one logs the accumulator's norm at
-every VAR scale:
+every VAR scale. It is `scripts/examples/fhat_norm.py`:
 
 ```python
-# my_hooks.py
+# Observe hook: log the VAR accumulator's norm per image at every scale (docs/hooks_quickstart.md).
+# Run from the repo root:  --hook scripts/examples/fhat_norm.py:fhat_norm
 import json
+import os
+from pathlib import Path
+
 from runner.hooks import Observe
+
+LOG = Path(os.environ.get("FHAT_NORM_LOG", "outputs/examples/fhat_norms.jsonl"))
+
 
 def log_fhat_norm(model, stage, p, when, state):
     norms = state.f_hat.float().flatten(1).norm(dim=1).tolist()   # one value per row
-    with open("fhat_norms.jsonl", "a") as f:
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as f:
         f.write(json.dumps({"stage": stage, "p": p, "rows": state.rows, "norm": norms}) + "\n")
+
 
 fhat_norm = Observe(log_fhat_norm, when="after", name="fhat_norm")
 ```
@@ -54,14 +63,19 @@ fhat_norm = Observe(log_fhat_norm, when="after", name="fhat_norm")
 Returns a state of the same class, usually `dataclasses.replace(state, <field>=new_tensor)`.
 Replaced tensors must keep their shape, dtype and device, and read-only fields must stay untouched,
 or the run stops with an error. This one removes scale 2's contribution for every image (VAR
-"skip-scale", version b):
+"skip-scale", version b). It is `scripts/examples/skip_scale_2.py`:
 
 ```python
+# Modify hook: remove VAR scale 2's contribution for every image ("skip-scale", version b).
+# Run from the repo root:  --hook scripts/examples/skip_scale_2.py:skip_scale_2
 import dataclasses
+
 from runner.hooks import Modify
+
 
 def drop_scale(model, stage, p, when, state):
     return dataclasses.replace(state, f_hat=state.f_hat_before)
+
 
 skip_scale_2 = Modify(drop_scale, when="after", stages=[2], name="skip_scale_2")
 ```
@@ -74,8 +88,13 @@ an error, never silently ignored. To change only some images, check `state.rows`
 
 ```bash
 python -m runner.generate --config configs/var_d20.yaml --manifest manifest/provisional_4x4.csv \
-    --batch-size 16 --out-dir outputs/my_exp --hook my_hooks.py:skip_scale_2 --hook my_hooks.py:fhat_norm
+    --batch-size 16 --out-dir outputs/my_exp \
+    --hook scripts/examples/skip_scale_2.py:skip_scale_2 --hook scripts/examples/fhat_norm.py:fhat_norm
 ```
+
+Every example on this page is a real file in `scripts/examples/`. `python scripts/examples/run_examples.py`
+runs them all on CPU with tiny random weights. For your own hooks, copy an example into `lanes/pN/`
+and load it from there, e.g. `--hook lanes/p2/hooks.py:NAME`.
 
 `--hook FILE.py:NAME` is repeatable, and `NAME` may be a list of hooks. At one stage, modify hooks
 run in the order given and observe hooks then see the result. `run.json` records every hook (name,

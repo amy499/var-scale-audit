@@ -56,22 +56,23 @@ bash scripts/nscc/setup_login.sh <PROJECT_ID>
 
 This creates the conda env, downloads and verifies all checkpoints, and checks `third_party/`. It is safe to
 re-run: if NSCC kills it on the login node or your connection drops, run the same command again. Downloads
-resume and the env is only rebuilt if `environment.yml` changed. It ends with `Setup complete.`
+resume and the env is only rebuilt if `environment.yml` changed. It ends with `Setup complete.` followed
+by the project-ID rule in §5.
 
-## 5. Fill in the project ID in the job script
+## 5. Project ID
 
-```bash
-sed -i 's/<PROJECT_ID>/YOUR_REAL_PROJECT_ID/' jobs/phase1_check.pbs
-grep '#PBS -P' jobs/phase1_check.pbs
-```
-
-(This edits a tracked file; don't commit it, or `git checkout jobs/phase1_check.pbs` afterwards.)
+The job files in `jobs/` contain `#PBS -P personal-gura0001`: P1's project, kept for P1's runs. Don't
+edit that line. Teammates submit with their own project on the command line,
+`qsub -P <your-project-id> <job file>`, then confirm with `qstat -f <JOBID> | grep -i project` that
+their project is shown. A `qsub` option overriding a `#PBS` line in the file is standard PBS
+behaviour, but we have not tested it on NSCC ourselves, so always do the `qstat` check.
 
 ## 6. Submit (from the repo root)
 
 ```bash
 cd ~/var-scale-audit
-qsub jobs/phase1_check.pbs
+qsub -P <your-project-id> jobs/phase1_check.pbs     # P1: plain `qsub jobs/phase1_check.pbs`
+qstat -f <JOBID> | grep -i project                  # must show the project you meant to charge
 ```
 
 1 GPU with a 1 h walltime on `normal` is routed to the `gdev` development queue (max 2 jobs per user).
@@ -110,7 +111,10 @@ scp '<USER>@aspire2antu.nscc.sg:~/var-scale-audit/outputs/phase1_check/<JOBID>/*
 
 - **`FATAL: torch.cuda.device_count() == 0`**: the summary's `DIAGNOSIS` lines and `CUDA_VISIBLE_DEVICES`
   say why. Paste the summary back; don't work around it in the job.
-- **`qsub: Unknown project` / job rejected**: the `#PBS -P` line still has the placeholder or a wrong ID.
+- **`qsub: Unknown project` / job rejected**: the project you gave with `qsub -P` is wrong, or (without
+  `-P`) you can't charge the job file's `personal-gura0001`. Pass your own with `qsub -P <your-project-id>`.
+- **`qstat -f <JOBID> | grep -i project` shows someone else's project**: the command-line override did
+  not take effect. Delete the job (`qdel <JOBID>`) and tell P1.
 - **No `outputs/phase1_check/<JOBID>/`**: the job didn't start in the repo root. Check
   `outputs/phase1_check/phase1_check.o<JOBID>` for PBS's own log.
 - **`EnvironmentNameNotFound: var-dit`**: step 4 didn't finish; re-run it.

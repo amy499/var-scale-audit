@@ -98,4 +98,8 @@ echo "== [5/5] third_party"
 python scripts/check_third_party.py
 
 echo
-echo "Setup complete. Next: set the project ID in jobs/phase1_check.pbs and 'qsub jobs/phase1_check.pbs'."
+echo "Setup complete."
+echo "Next: job files in jobs/ contain P1's project (#PBS -P personal-gura0001); don't edit it."
+echo "Teammates: submit from the repo root with your own project, qsub -P <your-project-id> <job file>,"
+echo "then confirm with 'qstat -f <JOBID> | grep -i project' that your project is shown."
+echo "(A qsub option overriding a #PBS line is standard PBS behaviour, but untested on NSCC by us.)"

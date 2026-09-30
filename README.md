@@ -91,6 +91,9 @@ Every 256px VAR depth has a config. They are identical (strict fp32, same sample
 | `configs/var_d16.yaml` | 16 | 310M | 1.2 GB | Available, not downloaded or run for now |
 | `configs/var_d30.yaml` | 30 | 2.0B | 8.0 GB | Available, not downloaded or run for now |
 
+- **Why d24 as well:** it was the headline model in the original proposal (1.0B params), and it gives a
+  second model size to check whether findings made on d20 hold across model size. d20 stays the primary
+  depth for all main results.
 - **Never mix depths within a comparison**: a baseline and the run compared with it use the same config.
 - At load, the runner checks that the checkpoint's block count and width match the config's depth and
   stops with a message naming both if not. `run.json` records `depth` and what the checkpoint contained.
@@ -111,13 +114,13 @@ Reference tensor hashes (sha256 of the raw output, class 207 seed 0, batch 1, on
 | Name | Config | Hash | Status |
 |---|---|---|---|
 | VAR d20 fp32 | `var_d20.yaml` | `f16021ea827ab2ea38e70aab22b8e87d64a47f2c9bc8d6500fce72108cdef2c8` | Current; checked as `EXPECT_VAR` in `jobs/phase3_check.pbs` |
-| VAR d24 fp32 | `var_d24.yaml` | not yet recorded | Fill in from the first `jobs/phase3b_depths.pbs` run (`d24/regression.json`) |
+| VAR d24 fp32 | `var_d24.yaml` | `8fb51f70f053c62d9dd2a7bc42a4611baa74c3ee728cd5c05a922ce9e4a3ecfe` | Current; checked in `jobs/phase3b_depths.pbs` |
 | VAR d16 fp32 | `var_d16.yaml` | not recorded | Not in use |
 | VAR d30 fp32 | `var_d30.yaml` | not recorded | Not in use |
 | VAR d20 fp16 | `var_d20_fp16.yaml` | `48db2d9e166a` (prefix) | Historical: Phase 1-2b |
 | DiT-XL/2 | `dit_xl2_256.yaml` (fp32 + TF32) | `2a3a0d6fbce9` (prefix) | Current |
 
-`jobs/phase3b_depths.pbs` also records the d20 hash; it must equal the "VAR d20 fp32" row.
+`jobs/phase3b_depths.pbs` checks the d20 and d24 hashes against these rows; other depths are only recorded.
 
 **Historical jobs.** `jobs/phase1_check.pbs`, `jobs/phase2_check.pbs` and `jobs/phase2b_tokens.pbs`
 were run with the fp16 VAR settings and expect the fp16 hash. Their `VAR_CONFIG` now defaults to
