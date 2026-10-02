@@ -1,0 +1,92 @@
+#!/bin/bash
+#PBS -N p2_pilot
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o outputs/p2/pbs/
+# P2 corruption pilot (lanes/p2/README.md): per model, a clean baseline, then noise at a few stages and
+# severities, each recorded with lanes/p2/schema.py and merged into outputs/p2/pilot/<JOBID>/tables/
+# (p2_summary.csv: image damage and state gap per stage x severity; p2_curves.csv: recovery curves).
+# Submit from the repo root with your own project:  qsub -P <your-project-id> lanes/p2/jobs/pilot.pbs
+# Every run uses the same config, manifest and batch size (16) as its baseline.
+set -uo pipefail
+[[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
+cd "$PBS_O_WORKDIR"
+[[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
+
+VAR_CONFIG="${VAR_CONFIG:-configs/var_d20.yaml}"
+DIT_CONFIG="${DIT_CONFIG:-configs/dit_xl2_256.yaml}"
+MANIFEST="${MANIFEST:-manifest/provisional_4x4.csv}"   # switch to P3's frozen manifest once it exists
+VAR_HOOK="${VAR_HOOK:-noise_h}"                         # noise_h (scale's own contribution) | noise_fhat (accumulator)
+VAR_STAGES="${VAR_STAGES:-0 3 6 9}"                     # VAR scales
+DIT_STAGES="${DIT_STAGES:-798 497 197}"                 # DiT timesteps (must be in the run.json stages table)
+SEVERITIES="${SEVERITIES:-0.25 1.0}"                    # noise std / state std (P2_SCALE=rel)
+RUN_VAR="${RUN_VAR:-1}"
+RUN_DIT="${RUN_DIT:-1}"
+JOB="${PBS_JOBID%%.*}"
+OUT="${OUT_ROOT:-outputs/p2}/pilot/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+FAILED=0
+
+generate() {   # generate <out-dir> <config> [hook names ...]; the caller sets the P2_* variables
+    local out="$1" config="$2" sampler="" status
+    shift 2
+    local hooks=()
+    for h in "$@"; do hooks+=(--hook "lanes/p2/hooks.py:$h"); done
+    mkdir -p "$(dirname "$out")"
+    if command -v nvidia-smi >/dev/null 2>&1; then   # peak GPU memory, sampled once a second
+        nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -l 1 > "$out.vram.log" 2>/dev/null &
+        sampler=$!
+    fi
+    python -m runner.generate --config "$config" --manifest "$MANIFEST" --batch-size 16 --out-dir "$out" \
+        ${hooks[@]+"${hooks[@]}"}
+    status=$?
+    [[ -n "$sampler" ]] && kill "$sampler" 2>/dev/null
+    return $status
+}
+
+record() {   # record <run-dir> <experiment> <arm> [schema record options ...]
+    local dir="$1" exp="$2" arm="$3" vram=()
+    shift 3
+    [[ -s "$dir.vram.log" ]] && vram=(--vram-log "$dir.vram.log")
+    python -m lanes.p2.schema record "$dir" --lane p2 --experiment "$exp" --arm "$arm" \
+        ${vram[@]+"${vram[@]}"} "$@"
+}
+
+sweep() {   # sweep <model> <config> <hook> <trace-every> "<stages>" : baseline, then stage x severity
+    local model="$1" config="$2" hook="$3" stages="$5" root="$OUT/$1" exp="${1}_pilot_$JOB" arm
+    export P2_TRACE_EVERY="$4"
+    echo "== $model baseline"
+    P2_TRACE_DIR="$root/trace" generate "$root/baseline" "$config" save_states \
+        && record "$root/baseline" "$exp" baseline || { echo "FAILED: $model baseline"; FAILED=1; return; }
+    for s in $stages; do
+        for sev in $SEVERITIES; do
+            arm="${hook}_s${s}_sev${sev}"
+            echo "== $model $arm"
+            P2_STAGE="$s" P2_SEVERITY="$sev" P2_TRACE_REF="$root/trace" P2_METRICS="$root/$arm/metrics.csv" \
+                generate "$root/$arm" "$config" "$hook" compare_states \
+                && record "$root/$arm" "$exp" "$arm" --baseline "$root/baseline" \
+                       --param hook="$hook" --param stage="$s" --param severity="$sev" --param scale=rel \
+                && python -m lanes.p2.analyze images "$root/$arm" --baseline "$root/baseline" \
+                || { echo "FAILED: $model $arm"; FAILED=1; }
+        done
+    done
+}
+
+[[ "$RUN_VAR" == 1 ]] && sweep var "$VAR_CONFIG" "$VAR_HOOK" 1 "$VAR_STAGES"
+[[ "$RUN_DIT" == 1 ]] && sweep dit "$DIT_CONFIG" noise_x 25 "$DIT_STAGES"
+
+python -m lanes.p2.schema collect "$OUT" --out "$OUT/tables" && python -m lanes.p2.analyze summary "$OUT/tables" || FAILED=1
+echo "code: $(git rev-parse --abbrev-ref HEAD) $(git log -1 --oneline)"
+if [[ "$FAILED" == 0 ]]; then echo "PILOT DONE: all runs recorded and paired"; else echo "PILOT FAILED: see above"; fi
+exit "$FAILED"
