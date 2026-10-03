@@ -1,0 +1,37 @@
+# macOS (Apple Silicon or Intel), CPU only: for editing, CPU tests with tiny random weights, and
+# small CPU runs. Never for results: GPU (NSCC) outputs are the reference, and CPU outputs differ
+# from them in the low bits.
+#
+#   conda env create -f environment-macos.yml   # README "macOS laptop"
+#   conda activate var-dit
+#
+# Same pins as environment.yml (the NSCC/CUDA env), except:
+#   - no pytorch-cuda (no CUDA on macOS);
+#   - torch/torchvision come from PyPI (official CPU wheels) instead of the pytorch conda channel;
+#   - transformers/accelerate are left out: listed upstream but never imported (README "Environment").
+# The env name is the same as on NSCC, so every "conda activate var-dit" in the docs and job
+# scripts works unchanged.
+name: var-dit
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy>=1.24,<2         # torch 2.1 wheels are built against NumPy 1.x
+  - pillow
+  - tqdm
+  - pyyaml
+  - pip
+  - pip:
+      - torch==2.1.2                # VAR: ~=2.1.0 ; DiT: >=1.13 (same as environment.yml)
+      - torchvision==0.16.2         # matches torch 2.1.2
+      # --- VAR ---
+      - huggingface_hub==0.23.5
+      - typed-argument-parser==1.10.1
+      - pytz
+      # --- DiT ---
+      - timm==0.9.16
+      - diffusers==0.27.2
+      # --- this project ---
+      - -e .
+variables:
+  PYTHONDONTWRITEBYTECODE: "1"   # never write __pycache__ into third_party/

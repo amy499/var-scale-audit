@@ -17,6 +17,16 @@ Shared generation runner for [VAR](https://github.com/FoundationVision/VAR) and 
 
 ## Setup
 
+| Where | Instructions | Environment file |
+|---|---|---|
+| NSCC ASPIRE 2A (all GPU runs and results) | [docs/NSCC.md](docs/NSCC.md) | `environment.yml` |
+| macOS laptop (editing, CPU tests) | [macOS](#macos-laptop-cpu-only) below | `environment-macos.yml` |
+| Other Linux machine with an NVIDIA GPU | the commands below | `environment.yml` |
+
+Both environment files create a conda env named `var-dit` with the same package versions, so
+`conda activate var-dit` works everywhere. `environment.yml` needs Linux with CUDA
+(`pytorch-cuda=11.8`) and does not install on macOS.
+
 ```bash
 git clone --recurse-submodules https://github.com/amy499/var-scale-audit.git
 # or, in an existing clone:
@@ -27,7 +37,46 @@ conda activate var-dit
 python scripts/check_third_party.py   # confirms submodules are pinned and clean
 ```
 
-On NSCC ASPIRE 2A, follow [docs/NSCC.md](docs/NSCC.md) instead of the commands below.
+### macOS laptop (CPU only)
+
+For editing, git and testing hooks on CPU with tiny random-weight models. Results come from NSCC only:
+CPU outputs are not bit-identical to the GPU reference hashes.
+
+```bash
+git clone --recurse-submodules https://github.com/amy499/var-scale-audit.git
+cd var-scale-audit                          # or, in an existing clone: git submodule update --init
+conda env create -f environment-macos.yml   # after a change to the file: conda env update -f environment-macos.yml
+conda activate var-dit
+export PYTHONDONTWRITEBYTECODE=1            # every new terminal, with the activate line
+python scripts/check_third_party.py         # two [ OK ] lines
+```
+
+No conda yet: install [Miniforge](https://github.com/conda-forge/miniforge). If `conda activate` fails
+in a new terminal, run `conda init zsh` once and open a new terminal.
+
+CPU tests (no GPU, no checkpoints; tiny models with the real stage structure, i.e. 10 VAR scales and
+250 DiT steps; times from an Apple Silicon laptop):
+
+```bash
+python scripts/phase2/check_seeding.py                # ~2 min, ends "ASSERTED CHECKS PASS"
+python scripts/phase3/check_hooks.py --configs tiny   # ~12 min, ends "ALL HOOK CHECKS PASS"
+```
+
+To try a hook on the tiny models (`pN` = your lane; tiny-model images are noise, only the mechanics
+are tested):
+
+```bash
+mkdir -p outputs/tiny
+python scripts/phase3/check_hooks.py --make-tiny var outputs/tiny   # writes outputs/tiny/var_tiny.yaml; "dit" -> dit_tiny.yaml
+python -m runner.generate --config outputs/tiny/var_tiny.yaml --manifest manifest/provisional_4x4.csv \
+    --batch-size 16 --out-dir outputs/pN/local/baseline
+python -m runner.generate --config outputs/tiny/var_tiny.yaml --manifest manifest/provisional_4x4.csv \
+    --batch-size 16 --out-dir outputs/pN/local/hooked --hook lanes/pN/hooks.py:NAME
+```
+
+In the two `run.json` files, `generator_state_sha256` must be equal row by row (pairing), and
+`tensor_sha256` must differ where the hook changes images. Real weights also run on CPU
+(`--device cpu`, after downloading checkpoints as below), but slowly, and never for results.
 
 ## Checkpoints (run on the login node)
 
@@ -140,7 +189,8 @@ arm would actually run in fp32.
 
 ## Environment
 
-`environment.yml` is the single source of truth for dependencies. It resolves these conflicts between the two upstream specs:
+`environment.yml` is the single source of truth for dependencies (`environment-macos.yml` mirrors its
+versions for CPU-only macOS laptops; change both together). It resolves these conflicts between the two upstream specs:
 
 | Package | VAR wants | DiT wants | Resolved to | Why |
 |---|---|---|---|---|
