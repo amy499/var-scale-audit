@@ -5,27 +5,37 @@
 #PBS -l walltime=01:00:00
 #PBS -j oe
 #PBS -o outputs/p2/pbs/
-# P2 corruption pilot (lanes/p2/README.md): per model, a clean baseline, then noise at a few stages and
-# severities, each recorded with lanes/p2/schema.py and merged into outputs/p2/pilot/<JOBID>/tables/
-# (p2_summary.csv: image damage and state gap per stage x severity; p2_curves.csv: recovery curves).
-# Submit from the repo root with your own project:  qsub -P <your-project-id> lanes/p2/jobs/pilot.pbs
+# P2 corruption sweep (lanes/p2/README.md): per model, a clean baseline, then noise at chosen stages and
+# severities, each recorded with lanes/p2/schema.py, scored (pixel distance; classifier + Inception
+# features with QUALITY=1) and merged into outputs/p2/<EXP_TAG>/<JOBID>/tables/
+# (p2_summary.csv: damage, quality and state gap per stage x severity; p2_curves.csv: recovery curves).
+# Submit from the repo root with your own project:
+#     qsub -P <your-project-id> lanes/p2/jobs/pilot.pbs                                   # the 16-image pilot
+#     qsub -P <your-project-id> -v SETTINGS=lanes/p2/jobs/gateb_var.env lanes/p2/jobs/pilot.pbs
+# SETTINGS names a file of the variables below (lanes/p2/jobs/*.env); it is read first, so it wins.
 # Every run uses the same config, manifest and batch size (16) as its baseline.
 set -uo pipefail
 [[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
 cd "$PBS_O_WORKDIR"
 [[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
+if [[ -n "${SETTINGS:-}" ]]; then
+    source "$SETTINGS" || { echo "cannot read SETTINGS=$SETTINGS" >&2; exit 1; }
+fi
 
 VAR_CONFIG="${VAR_CONFIG:-configs/var_d20.yaml}"
 DIT_CONFIG="${DIT_CONFIG:-configs/dit_xl2_256.yaml}"
-MANIFEST="${MANIFEST:-manifest/provisional_4x4.csv}"   # switch to P3's frozen manifest once it exists
+MANIFEST="${MANIFEST:-manifest/provisional_4x4.csv}"
 VAR_HOOK="${VAR_HOOK:-noise_h}"                         # noise_h (scale's own contribution) | noise_fhat (accumulator)
 VAR_STAGES="${VAR_STAGES:-0 3 6 9}"                     # VAR scales
 DIT_STAGES="${DIT_STAGES:-798 497 197}"                 # DiT timesteps (must be in the run.json stages table)
 SEVERITIES="${SEVERITIES:-0.25 1.0}"                    # noise std / state std (P2_SCALE=rel)
+DIT_SEVERITIES="${DIT_SEVERITIES:-$SEVERITIES}"
 RUN_VAR="${RUN_VAR:-1}"
 RUN_DIT="${RUN_DIT:-1}"
+QUALITY="${QUALITY:-1}"                                 # 1: classifier + Inception features (lanes/p2/quality.py)
+EXP_TAG="${EXP_TAG:-pilot}"
 JOB="${PBS_JOBID%%.*}"
-OUT="${OUT_ROOT:-outputs/p2}/pilot/$JOB"
+OUT="${OUT_ROOT:-outputs/p2}/$EXP_TAG/$JOB"
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/job.log") 2>&1
 
@@ -37,6 +47,10 @@ conda activate var-dit
 set -u
 export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
 FAILED=0
+
+[[ -f "$MANIFEST" ]] || { echo "FAILED: manifest not found: $MANIFEST" >&2; exit 1; }
+echo "settings: ${SETTINGS:-<none>}  manifest: $MANIFEST ($(python -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$MANIFEST"))"
+echo "VAR: $VAR_HOOK at [$VAR_STAGES] x [$SEVERITIES]  DiT: noise_x at [$DIT_STAGES] x [$DIT_SEVERITIES]  quality: $QUALITY"
 
 generate() {   # generate <out-dir> <config> [hook names ...]; the caller sets the P2_* variables
     local out="$1" config="$2" sampler="" status
@@ -63,14 +77,19 @@ record() {   # record <run-dir> <experiment> <arm> [schema record options ...]
         ${vram[@]+"${vram[@]}"} "$@"
 }
 
-sweep() {   # sweep <model> <config> <hook> <trace-every> "<stages>" : baseline, then stage x severity
-    local model="$1" config="$2" hook="$3" stages="$5" root="$OUT/$1" exp="${1}_pilot_$JOB" arm
+quality() {   # quality <run-dir>: classifier scores + Inception features, if QUALITY=1
+    [[ "$QUALITY" != 1 ]] || python -m lanes.p2.quality "$1"
+}
+
+sweep() {   # sweep <model> <config> <hook> <trace-every> "<stages>" "<severities>": baseline, then stage x severity
+    local model="$1" config="$2" hook="$3" stages="$5" sevs="$6" root="$OUT/$1" exp="${1}_${EXP_TAG}_$JOB" arm
     export P2_TRACE_EVERY="$4"
     echo "== $model baseline"
     P2_TRACE_DIR="$root/trace" generate "$root/baseline" "$config" save_states \
-        && record "$root/baseline" "$exp" baseline || { echo "FAILED: $model baseline"; FAILED=1; return; }
+        && record "$root/baseline" "$exp" baseline && quality "$root/baseline" \
+        || { echo "FAILED: $model baseline"; FAILED=1; return; }
     for s in $stages; do
-        for sev in $SEVERITIES; do
+        for sev in $sevs; do
             arm="${hook}_s${s}_sev${sev}"
             echo "== $model $arm"
             P2_STAGE="$s" P2_SEVERITY="$sev" P2_TRACE_REF="$root/trace" P2_METRICS="$root/$arm/metrics.csv" \
@@ -78,13 +97,14 @@ sweep() {   # sweep <model> <config> <hook> <trace-every> "<stages>" : baseline,
                 && record "$root/$arm" "$exp" "$arm" --baseline "$root/baseline" \
                        --param hook="$hook" --param stage="$s" --param severity="$sev" --param scale=rel \
                 && python -m lanes.p2.analyze images "$root/$arm" --baseline "$root/baseline" \
+                && quality "$root/$arm" \
                 || { echo "FAILED: $model $arm"; FAILED=1; }
         done
     done
 }
 
-[[ "$RUN_VAR" == 1 ]] && sweep var "$VAR_CONFIG" "$VAR_HOOK" 1 "$VAR_STAGES"
-[[ "$RUN_DIT" == 1 ]] && sweep dit "$DIT_CONFIG" noise_x 25 "$DIT_STAGES"
+[[ "$RUN_VAR" == 1 ]] && sweep var "$VAR_CONFIG" "$VAR_HOOK" 1 "$VAR_STAGES" "$SEVERITIES"
+[[ "$RUN_DIT" == 1 ]] && sweep dit "$DIT_CONFIG" noise_x 25 "$DIT_STAGES" "$DIT_SEVERITIES"
 
 python -m lanes.p2.schema collect "$OUT" --out "$OUT/tables" && python -m lanes.p2.analyze summary "$OUT/tables" || FAILED=1
 echo "code: $(git rev-parse --abbrev-ref HEAD) $(git log -1 --oneline)"

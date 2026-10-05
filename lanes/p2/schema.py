@@ -233,6 +233,20 @@ def append_metrics(run_dir, rows) -> Path:
     return path
 
 
+def replace_metrics(run_dir, names, rows) -> Path:
+    """Like append_metrics, but first drop every existing row whose metric is in `names`, so re-running
+    a metric script replaces its numbers instead of duplicating them. Other metrics are kept."""
+    path = Path(run_dir) / "metrics.csv"
+    if path.is_file():
+        with path.open(newline="", encoding="utf-8") as f:
+            kept = [row for row in csv.DictReader(f) if row["metric"] not in set(names)]
+        with path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=METRIC_COLUMNS)
+            w.writeheader()
+            w.writerows(kept)
+    return append_metrics(run_dir, rows)
+
+
 # ---------------------------------------------------------------- merged tables
 
 def _write_csv(path: Path, columns, rows):

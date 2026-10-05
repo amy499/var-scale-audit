@@ -191,23 +191,47 @@ def check_schema(var_cfg, dirs, work):
           and sum(float(r["mean"]) == 0 for r in curve) == 3, {"exit": p.returncode, "row": s, "stderr": p.stderr[-400:]})
 
 
+def check_kid():
+    import numpy as np
+    from lanes.p2.analyze import kid
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=(16, 64))
+    check("KID: a set paired with itself gives exactly 0; a shifted set gives > 0",
+          kid(a, a, paired=True) == 0.0 and kid(a, a + 1.0, paired=True) > 0 and kid(a, a + 1.0) > 0)
+
+
 def check_pilot_job(var_cfg, work):
-    """lanes/p2/jobs/pilot.pbs under bash on CPU (VAR only, one stage, one severity); module/nvidia-smi just fail here."""
+    """lanes/p2/jobs/pilot.pbs under bash on CPU (VAR only, one stage, one severity), its variables given in a
+    SETTINGS file as the Gate B jobs do; module/nvidia-smi just fail here. The quality step runs only if the
+    classifier weights are present (python -m lanes.p2.quality --download)."""
+    from lanes.p2.quality import WEIGHTS_DIR, WEIGHTS_URL
+    with_quality = (WEIGHTS_DIR / Path(WEIGHTS_URL).name).is_file()
+    settings = work / "check.env"
+    settings.write_text(f'VAR_CONFIG={var_cfg}\nRUN_DIT=0\nVAR_STAGES="3"\nSEVERITIES="0.5"\nEXP_TAG=checktag\n'
+                        f"QUALITY={int(with_quality)}\n")
     env = {k: v for k, v in os.environ.items() if not k.startswith("P2_")}
-    env.update(PYTHONDONTWRITEBYTECODE="1", PBS_JOBID="cpucheck.local", PBS_O_WORKDIR=str(REPO), VAR_CONFIG=str(var_cfg),
-               OUT_ROOT=str(work / "lane"), RUN_DIT="0", VAR_STAGES="3", SEVERITIES="0.5")
+    env.update(PYTHONDONTWRITEBYTECODE="1", PBS_JOBID="cpucheck.local", PBS_O_WORKDIR=str(REPO),
+               OUT_ROOT=str(work / "lane"), SETTINGS=str(settings))
     p = subprocess.run([shutil.which("bash"), str(REPO / "lanes" / "p2" / "jobs" / "pilot.pbs")], cwd=REPO, env=env,
                        capture_output=True, text=True)
-    root = work / "lane" / "pilot" / "cpucheck"
+    root = work / "lane" / "checktag" / "cpucheck"
     runs = metrics(root / "tables" / "runs.csv") if (root / "tables" / "runs.csv").is_file() else []
     arm = {r["arm"]: r for r in runs}.get("noise_h_s3_sev0.5", {})
-    n_metrics, n_summary = [len(metrics(root / "tables" / f)) if (root / "tables" / f).is_file() else 0
-                            for f in ("metrics.csv", "p2_summary.csv")]
-    check("pilot.pbs on CPU (tiny VAR): baseline and one corruption run, recorded, paired and merged",
+    n_metrics = len(metrics(root / "tables" / "metrics.csv")) if (root / "tables" / "metrics.csv").is_file() else 0
+    summary = metrics(root / "tables" / "p2_summary.csv") if (root / "tables" / "p2_summary.csv").is_file() else []
+    s = summary[0] if summary else {}
+    check("pilot.pbs on CPU (tiny VAR) with a SETTINGS file: baseline and one corruption run, recorded, paired, merged",
           p.returncode == 0 and "PILOT DONE" in p.stdout and len(runs) == 2 and arm.get("pairing_ok") == "True"
+          and arm.get("experiment") == "var_checktag_cpucheck"
           and json.loads(arm.get("params", "{}")) == {"hook": "noise_h", "stage": 3, "severity": 0.5, "scale": "rel"}
-          and n_metrics > 16 and n_summary == 1,
+          and n_metrics > 16 and len(summary) == 1,
           {"exit": p.returncode, "tail": (p.stdout + p.stderr)[-600:]})
+    if with_quality:
+        check("quality step: classifier scores and KID vs the baseline in the summary",
+              s.get("cls_prob") not in (None, "") and s.get("cls_prob_base") not in (None, "")
+              and s.get("cls_agree_base") not in (None, "") and s.get("kid_vs_base") not in (None, ""), s)
+    else:
+        print("SKIP  quality step (no classifier weights; python -m lanes.p2.quality --download)")
 
 
 def main():
@@ -220,6 +244,7 @@ def main():
     tiny.mkdir(parents=True, exist_ok=True)
 
     check_noise_unit()
+    check_kid()
     for repo in ("var",) if args.skip_dit else ("var", "dit"):
         p = py(REPO / "scripts" / "phase3" / "check_hooks.py", "--make-tiny", repo, tiny)
         if p.returncode:

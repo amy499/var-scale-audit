@@ -8,6 +8,9 @@ become irreversible? (Figure 2: stage × severity maps and recovery curves.)
 | `hooks.py` | Corruption hooks (noise at chosen stages) and state-trace observers |
 | `schema.py`, `SCHEMA.md` | Shared logging / output schema (P2's shared-work item): `experiment.json`, pairing check, merged tables |
 | `analyze.py` | Image damage vs the baseline, and the summary tables behind Figure 2 |
+| `quality.py` | Interim quality metric: ImageNet classifier scores and Inception features (for KID) per image |
+| `jobs/gateb_var.env`, `jobs/gateb_dit.env` | Settings for the Gate B runs of `jobs/pilot.pbs` |
+| `results/` | Results shared through git (`results/pilot_25656645/`: the first pilot) |
 | `jobs/pilot.pbs` | Pilot: baseline + stage × severity sweep on each model, recorded, merged and summarised |
 | `check_p2.py` | CPU tests of all of the above with tiny random-weight models |
 
@@ -89,8 +92,61 @@ python -m lanes.p2.analyze summary <folder>/tables                      # p2_sum
 | `p2_curves.csv` | Per run and traced stage, the mean of each `state_*` metric: the recovery curves |
 
 `gap_l2_ratio` < 1 means the gap to the baseline shrank after the corruption, > 1 that it grew. These
-are plain pixel and state distances for pilots; they say how much an image changed, not whether it
-still looks right. That needs P3's calibrated metrics.
+are plain pixel and state distances; they say how much an image changed, not whether it still looks
+right. For that, see "Quality" below.
+
+## Quality (interim, until P3's calibrated metrics)
+
+The pilot showed that pixel distance cannot tell a different but valid image (VAR, early corruption)
+from a broken one (DiT, late corruption). `quality.py` adds two views, both from torchvision's
+ImageNet Inception-v3 (the network family behind IS / FID; weights pinned by hash):
+
+| Column in `p2_summary.csv` | Meaning | Catches |
+|---|---|---|
+| `cls_prob`, `cls_prob_base` | Mean classifier probability of the image's own class, corrupted run vs its baseline | Lost meaning (no longer recognisably the class) |
+| `cls_top1`, `cls_top5` (+ `_base`) | Fraction of images whose class is the top-1 / in the top-5 prediction | Same |
+| `cls_agree_base` | Fraction of images whose top prediction equals the baseline image's | Changed meaning |
+| `kid_vs_base` | KID between the run's and the baseline's Inception features (paired: 0 for identical runs) | Visible damage as a set (oversaturation, artifacts), even when the class is still recognised |
+
+On the pilot, the classifier keeps VAR's re-routed images at the baseline level (0.74-0.82 vs 0.75)
+and drops to 0.00 for DiT 197 / severity 1.0, but still recognises DiT 497 / severity 1.0 (0.73),
+whose images are oversaturated. KID flags both damaged DiT runs (+0.019, +0.187) and leaves every
+clean-looking run within ±0.003. With 16 images KID is noisy; 224 images make it steadier.
+
+```bash
+python -m lanes.p2.quality --download         # once, on the login node (internet): ~105 MB into checkpoints/classifier/
+python -m lanes.p2.quality <run dir> [...]     # GPU if available; pilot.pbs runs it when QUALITY=1 (default)
+```
+
+This overlaps with P3's metric work: it is P2's interim measure, to be replaced by or checked against
+P3's calibrated metrics.
+
+## Gate B (11 Oct): VAR + DiT on manifest v1.1
+
+The manifest is P1's draft `manifest/frozen_v1_1.csv` (7 dog classes × 32 images = 224), pending P3's
+sign-off and not yet on `main`. It is copied into the gitignored `outputs/` so the shared `manifest/`
+folder is untouched; if v1.1 changes before sign-off, rerun.
+
+```bash
+# NSCC login node, from the repo root, once
+git fetch origin && git checkout <this branch> && git pull
+mkdir -p outputs/p2/manifest outputs/p2/pbs
+git show origin/p1/manifest-v1.1:manifest/frozen_v1_1.csv > outputs/p2/manifest/frozen_v1_1.csv
+sha256sum outputs/p2/manifest/frozen_v1_1.csv          # caf0535d9cb0... for the 3 Oct draft
+python -m lanes.p2.quality --download
+
+# the two runs (each fits the 2 h development queue)
+qsub -P <your-project-id> -l walltime=02:00:00 -v SETTINGS=lanes/p2/jobs/gateb_var.env lanes/p2/jobs/pilot.pbs
+qsub -P <your-project-id> -l walltime=02:00:00 -v SETTINGS=lanes/p2/jobs/gateb_dit.env lanes/p2/jobs/pilot.pbs
+```
+
+| Job | Grid | Runs | Estimated time |
+|---|---|---|---|
+| `gateb_var.env` | `noise_h` at all 10 scales × severities 0.25, 0.5, 1, 2, 4 | 51 | ~35-40 min |
+| `gateb_dit.env` | `noise_x` at timesteps 798, 497, 197 × severities 0.25, 0.5, 1 | 10 | ~80 min |
+
+Estimates scale the pilot's measured times to 224 images. Outputs: `outputs/p2/gateb/<JOBID>/`, ending
+with `PILOT DONE` and `tables/p2_summary.csv`.
 
 ## Running
 
@@ -118,7 +174,7 @@ Outputs: `outputs/p2/pilot/<JOBID>/{var,dit}/<arm>/` (images, `run.json`, `exper
 
 ## Not done yet
 
-- Perceptual / semantic metrics on the final images (P3's calibrated metrics; they go into `metrics.csv`).
+- P3's calibrated perceptual / semantic metrics (they go into `metrics.csv`, next to `quality.py`'s).
 - Severity schedule and stage grid for the full sweep (decide after the pilot).
 - Plots of the maps and recovery curves (P4's plotting template; `var-dit` has no matplotlib).
 - The final manifest (P3); everything so far uses `manifest/provisional_4x4.csv`.
