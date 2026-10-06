@@ -14,7 +14,8 @@
 # 1 GPU brings a fixed 16 CPUs / 110 GB. <=2 h walltime on 'normal' routes to the gdev queue.
 # Results: outputs/baseline/<job id>/summary.txt
 #
-# PROVISIONAL: manifest v1.1 is a DRAFT pending P3 sign-off (docs/manifest_frozen.md).
+# Default manifest: v1.1, frozen 2026-10-07 (docs/manifest_frozen.md).
+# Exits 1 (after writing the summary) if a model step or a contact sheet failed.
 #   var_d20   configs/var_d20.yaml (strict fp32)       -> outputs/baseline/<job id>/var_d20/
 #   dit       configs/dit_xl2_256.yaml (fp32 + TF32)   -> outputs/baseline/<job id>/dit/
 #   contact   one sheet per model, a row per class with its first 8 images, for the breed check
@@ -81,7 +82,7 @@ done
 for m in "${MODELS[@]}"; do
     if [[ -f "$OUT/$m/run.json" ]]; then
         step "contact_$m" python scripts/baseline/contact_sheet.py "$OUT/$m" "$OUT/contact_$m.png" \
-            --per-class 8 --title "$m  ${CONFIG[$m]}  $MANIFEST  job $JOB  (PROVISIONAL)"
+            --per-class 8 --title "$m  ${CONFIG[$m]}  $MANIFEST  job $JOB"
     else
         echo "no $OUT/$m/run.json; skipping contact_$m"
     fi
@@ -91,9 +92,15 @@ done
 step_field() {   # step_field NAME COLUMN (2 = exit code, 3 = seconds)
     awk -F'\t' -v n="$1" -v c="$2" '$1 == n { v = $c } END { print (v == "" ? "not run" : v) }' "$OUT/steps.tsv"
 }
+FAILED=()   # model steps and contact sheets whose exit code is not 0 (including "not run")
+for m in "${MODELS[@]}"; do
+    for s in "$m" "contact_$m"; do
+        [[ "$(step_field "$s" 2)" == 0 ]] || FAILED+=("$s")
+    done
+done
 {
     echo "BASELINE (no hooks)  job $PBS_JOBID  $(date -Is)"
-    echo "STATUS: PROVISIONAL (manifest v1.1 draft, pending P3 sign-off; docs/manifest_frozen.md)"
+    echo "RESULT: $([[ ${#FAILED[@]} -eq 0 ]] && echo OK || echo "FAILED (${FAILED[*]})")"
     echo
     echo "git commit       $COMMIT${DIRTY:+ (tracked files modified)}"
     echo "manifest         $MANIFEST"
@@ -116,3 +123,4 @@ step_field() {   # step_field NAME COLUMN (2 = exit code, 3 = seconds)
 } > "$OUT/summary.txt"
 cat "$OUT/summary.txt"
 echo "Summary: $OUT/summary.txt"
+[[ ${#FAILED[@]} -eq 0 ]] || exit 1
