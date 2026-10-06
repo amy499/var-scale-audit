@@ -13,7 +13,6 @@ constants copied from the plan.
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 

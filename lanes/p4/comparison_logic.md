@@ -110,10 +110,18 @@ Three consequences stated rather than discovered:
 - The swept reduction therefore cannot exceed `k / n`: **0.3** for VAR-d20 and **0.332** for the
   250-step DiT schedule. Figure 4 describes a bounded curve, not a general reduction curve.
 - On DiT, equal `m` alone is not equal severity: consecutive skipped timesteps merge into one long
-  transition, so a packed selection and a spread one differ sharply at the same budget. Every arm
-  therefore picks its `m` stages at a **fixed stride within its own eligible set**, and records the
-  resulting merged-window count and lengths, so the arms are shown to match in structure as well as in
-  count.
+  transition, so a packed selection and a spread one differ sharply at the same budget. **Damage is the
+  constrained arm** — it must fit inside `B` — so its selection is made first, at an even stride within
+  `B`, and protect and control then reproduce that *same multiset of window lengths* in their own
+  eligible stages. The three arms therefore match in window count and window lengths as well as in
+  total budget, and each arm records its own structure so the match is checkable rather than asserted.
+- The control is a **uniform draw** across all eligible stages from a fixed, recorded seed, not a third
+  even spread. An even spread is not harmless here: at small `n` it lands on exactly the protect set —
+  on VAR's early band it did so at `m = 1` and `m = 3` — which would leave the control arm testing
+  nothing while still looking like a fourth arm. The control is therefore drawn at random subject to the
+  window structure, redrawn from successive seeds if it coincides with protect or damage, and the seed
+  actually used is recorded with the arm. An arm that cannot be separated at all is flagged rather than
+  run.
 
 **This narrows the frozen contract's wording.** `VAR Audit Integrated Research and Execution Plan.md`
 §4 reads "protect candidate important scales while pruning/degrading the others". Taken literally,

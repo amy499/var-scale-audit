@@ -132,6 +132,18 @@ def frozen_stages(model: str) -> list[dict]:
     return dit_stages(cfg["sampler"]["num_sampling_steps"])
 
 
+def stages_for_config(config_path) -> tuple[str, list[dict]]:
+    """(model, baseline stages table) for any run config, so a driver can plan arms without a GPU."""
+    import yaml
+    cfg = yaml.safe_load(Path(config_path).read_text())
+    model = cfg.get("model")
+    if model == "var":
+        return model, var_stages(cfg["build"]["patch_nums"])
+    if model == "dit":
+        return model, dit_stages(cfg["sampler"]["num_sampling_steps"])
+    raise ValueError(f"{config_path}: model must be 'var' or 'dit', got {model!r}")
+
+
 def run_record(model: str, stages: list[dict], rows=((207, 0),), **extra) -> dict:
     """A minimal run record shaped like run.json, for checks that read one through load_run()."""
     return {"model": model, "stages": stages,

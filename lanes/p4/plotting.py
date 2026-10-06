@@ -24,7 +24,6 @@ their frozen extents, so a band with no rows renders empty instead of shifting t
 """
 
 import csv
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -307,6 +306,7 @@ def lane_plot_spec(rows: list[dict], *, title: str | None = None, kind: str = "l
     return {"title": title or f"early / middle / late: {', '.join(metrics)}",
             "x_label": f"normalized progress p_place  (ticks: {native})",
             "panels": panels, "bands": dict(BAND_EXTENTS), "band_notes": band_annotation(rows),
+            "x_range": (0.0, 1.0),
             "footnote": "bands are cut on the placement axis at 1/3 and 2/3, half-open; "
                         "'committed' is the functional axis (VAR tokens, DiT sqrt(alpha_bar))"}
 
@@ -373,8 +373,8 @@ def _series_range(panel: dict) -> tuple[float, float]:
     if hi == lo:
         pad = abs(hi) * 0.1 or 0.5
         return lo - pad, hi + pad
-    pad = (hi - lo) * 0.08
-    return lo - pad, hi + pad
+    span = hi - lo
+    return lo - span * 0.08, hi + span * 0.22   # extra headroom so the legend does not sit on the data
 
 
 def _render_matplotlib(spec: dict, out_path: Path, size) -> Path:
@@ -401,7 +401,7 @@ def _render_matplotlib(spec: dict, out_path: Path, size) -> Path:
                        width=width, label=s["label"], color=colour)
             else:
                 ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.4, label=s["label"], color=colour)
-        ax.set_xlim(0, 1)
+        ax.set_xlim(*spec.get("x_range", (0.0, 1.0)))
         ax.set_ylim(*_series_range(panel))
         ax.set_xticks([p for p, _l in panel["x_ticks"]])
         ax.set_xticklabels([l for _p, l in panel["x_ticks"]], fontsize=6.5, rotation=45)
@@ -410,7 +410,7 @@ def _render_matplotlib(spec: dict, out_path: Path, size) -> Path:
         ax.set_title(panel["title"], fontsize=9, pad=26)   # clears the band labels at y = 1.01
         ax.tick_params(labelsize=7)
         if panel["series"]:
-            ax.legend(fontsize=7, frameon=False)
+            ax.legend(fontsize=7, loc="best", framealpha=0.85)
     fig.suptitle(spec["title"], fontsize=11)
     fig.text(0.5, 0.005, spec["footnote"], ha="center", fontsize=6.5, color="#555555")
     fig.tight_layout(rect=(0, 0.03, 1, 0.9))
@@ -446,8 +446,11 @@ def _render_pillow(spec: dict, out_path: Path, size) -> Path:
         y0, y1 = pad_t, H - pad_b
         lo, hi = _series_range(panel)
 
+        xlo, xhi = spec.get("x_range", (0.0, 1.0))
+        xspan = (xhi - xlo) or 1.0
+
         def px(p):
-            return x0 + p * (x1 - x0)
+            return x0 + (p - xlo) / xspan * (x1 - x0)
 
         def py(v):
             return y1 - (v - lo) / (hi - lo) * (y1 - y0)
@@ -469,6 +472,7 @@ def _render_pillow(spec: dict, out_path: Path, size) -> Path:
         for p, label in panel["x_ticks"]:
             d.line([px(p), y1, px(p), y1 + 4], fill="#333333")
             d.text((px(p) - 3.0 * len(label) / 2, y1 + 8), label, fill="#333333", font=f_small)
+        legend = []
         for i, s in enumerate(panel["series"]):
             colour = PALETTE[i % len(PALETTE)]
             pts = [(px(x), py(v)) for x, v in s["points"]]
@@ -482,7 +486,24 @@ def _render_pillow(spec: dict, out_path: Path, size) -> Path:
                     d.line(pts, fill=colour, width=2)
                 for cx, cy in pts:
                     d.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=colour)
-            d.rectangle([x1 - 56, y0 + 6 + i * 12, x1 - 46, y0 + 14 + i * 12], fill=colour)
-            d.text((x1 - 42, y0 + 5 + i * 12), s["label"], fill="#333333", font=f_small)
+            legend.append((colour, s["label"]))
+        if legend:
+            width = 22 + 6 * max(len(label) for _c, label in legend)
+            height = 10 + 12 * len(legend)
+            # put it in whichever top corner holds less data, so it never hides a series
+            upper = y0 + 0.5 * (y1 - y0)
+            mid_x = (x0 + x1) / 2
+            crowd_left = sum(1 for s in panel["series"] for x, v in s["points"]
+                             if py(v) < upper and px(x) < mid_x)
+            crowd_right = sum(1 for s in panel["series"] for x, v in s["points"]
+                              if py(v) < upper and px(x) >= mid_x)
+            left = crowd_left < crowd_right
+            box = ([x0 + 4, y0 + 4, x0 + width + 4, y0 + 4 + height] if left else
+                   [x1 - width - 4, y0 + 4, x1 - 4, y0 + 4 + height])
+            d.rectangle(box, fill="white", outline="#cccccc")
+            for i, (colour, label) in enumerate(legend):
+                d.rectangle([box[0] + 5, box[1] + 6 + i * 12, box[0] + 15, box[1] + 14 + i * 12],
+                            fill=colour)
+                d.text((box[0] + 19, box[1] + 5 + i * 12), label, fill="#333333", font=f_small)
     img.save(out_path)
     return out_path
