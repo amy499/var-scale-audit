@@ -10,7 +10,7 @@ progress value, with the final band closed at 1.0. A stage whose progress lands 
 belongs to the upper band, and the last stage (p = 1.0) is always late.
 
 The cuts come from the schedule alone -- the number of scales or steps and nothing else. No P1-P3
-finding feeds into them, which is what keeps P4's pilot independent of the other lanes (R7). Because
+finding feeds into them, which is what keeps P4's pilot independent of the other lanes. Because
 other lanes' figures are drawn against these lists, a change here invalidates comparisons already
 made: treat it as a group-level decision, not a lane edit (lanes/p4/comparison_logic.md).
 """
@@ -22,7 +22,8 @@ sys.dont_write_bytecode = True
 
 BANDS = ("early", "middle", "late")
 CUTS = (1 / 3, 2 / 3)       # half-open [lo, hi) on the placement axis; the final band closes at 1.0
-PLACEMENT = "p_place"       # bands are cut on this axis (KTD1); "p_func" is a reporting convention
+PLACEMENT = "p_place"       # bands are cut on this axis; "p_func" is a reporting convention
+                            # carried beside it (lanes/p4/comparison_logic.md section 2)
 
 # Frozen for the two schedules every lane reports on. Asserted against the frozen configs by
 # lanes/p4/check_p4_shared.py, so these are a published record, never the source of the split.
@@ -69,13 +70,6 @@ def assign_bands(mapped: list[dict], basis: str = PLACEMENT) -> list[dict]:
             raise BandError(f"mapped stage row {i} has no {basis!r}; map it with lanes.p4.progress first")
         out.append({**row, "band": band_of(row[basis])})
     return out
-
-
-def band_stages(model: str, band: str) -> tuple[int, ...]:
-    """The frozen native stages of one band: VAR si, DiT original timestep, in sampling order."""
-    if band not in BANDS:
-        raise BandError(f"band must be one of {BANDS}, got {band!r}")
-    return tuple(frozen_band_stages(model)[band])
 
 
 def frozen_band_stages(model: str) -> dict:

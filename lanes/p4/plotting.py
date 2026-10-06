@@ -7,7 +7,7 @@ Run from the repo root.
                                   arm="baseline", lane="p1")
     plotting.lane_plot(rows, "outputs/p1/fig.png", title="P1: scale importance")
 
-Two layers, so a lane that has no plotting library can still do the analysis (R11):
+Two layers, so a lane that has no plotting library can still do the analysis:
 
   **data layer**  standard library only. Maps a run's stages to both progress axes, assigns bands,
                   joins the lane's metric values, and emits one tidy table. Importing this module and
@@ -17,7 +17,7 @@ Two layers, so a lane that has no plotting library can still do the analysis (R1
                   name and raises one actionable message if it is absent.
 
 Metric names, directions and aggregation levels are **data** (MetricSpec), never a hardcoded list, so
-P3's final metric definitions drop in without a change here (R10).
+P3's final metric definitions drop in without a change here (lanes/p4/PLOTTING.md section 3).
 
 The x axis is normalized progress with the native stage on the ticks, and the three bands are drawn at
 their frozen extents, so a band with no rows renders empty instead of shifting the other two.
@@ -36,13 +36,14 @@ if str(REPO) not in sys.path:
 
 from lanes.p4 import bands, progress  # noqa: E402
 
+BACKENDS = ("matplotlib", "pillow")      # render layer, in preference order
 DIRECTIONS = ("higher_is_better", "lower_is_better")
 LEVELS = ("per_image", "per_set")
 
 # P2's merged columns (lanes/p2/SCHEMA.md) plus the four P4 adds: band, p_place, p_func, and the
 # metric's direction/level. `arm` and `lane` already come from P2's runs.csv.
 TIDY_COLUMNS = ("run_id", "lane", "model", "arm", "class_id", "seed", "stage",
-                "p_place", "p_func", "band", "metric", "value", "direction", "level")
+                "p_place", "p_func", "band", "metric", "label", "value", "direction", "level")
 
 BAND_EXTENTS = {"early": (0.0, bands.CUTS[0]), "middle": bands.CUTS, "late": (bands.CUTS[1], 1.0)}
 
@@ -77,11 +78,23 @@ class MetricSpec:
 
     @property
     def axis_label(self) -> str:
-        arrow = "higher is better" if self.direction == "higher_is_better" else "lower is better"
-        return f"{self.label or self.name}  ({arrow})"
+        return f"{self.label or self.name}  ({direction_phrase(self.direction)})"
 
 
 # ---------------------------------------------------------------- data layer (standard library only)
+
+def direction_phrase(direction: str) -> str:
+    """The words a reader sees on an axis, so a figure never has to spell this out itself."""
+    return "higher is better" if direction == "higher_is_better" else "lower is better"
+
+
+def native_label(models) -> str:
+    """What the x ticks are, named for the model when a figure holds only one."""
+    models = sorted(set(models))
+    if models == ["var"]:
+        return "VAR scale si"
+    return "DiT timestep" if models == ["dit"] else "native stage"
+
 
 def _specs(metrics) -> dict:
     out = {}
@@ -141,8 +154,8 @@ def tidy_from_run(run, metric_rows, metrics, *, arm: str, lane: str | None = Non
         out.append({"run_id": rid, "lane": lane, "model": model, "arm": arm,
                     "class_id": _int_or_none(row.get("class_id")), "seed": _int_or_none(row.get("seed")),
                     "stage": stage, "p_place": stage_row["p_place"], "p_func": stage_row["p_func"],
-                    "band": stage_row["band"], "metric": name, "value": value,
-                    "direction": spec.direction, "level": spec.level})
+                    "band": stage_row["band"], "metric": name, "label": spec.label or name,
+                    "value": value, "direction": spec.direction, "level": spec.level})
     if unknown_stages:
         raise PlotError(
             f"{rid}: metric rows name stages {sorted(unknown_stages)} that this run's stages table does "
@@ -235,9 +248,10 @@ def read_tidy(path) -> list[dict]:
     return out
 
 
-def _mean(values):
+def mean(values):
+    """The arithmetic mean, spelled one way across the lane (sum/len, not statistics.fmean)."""
     values = list(values)
-    return sum(values) / len(values) if values else None
+    return sum(values) / len(values)
 
 
 def aggregate(rows: list[dict]) -> dict:
@@ -254,7 +268,7 @@ def aggregate(rows: list[dict]) -> dict:
                             f"of arm {arm!r}; a per_set metric is one value per stage")
         first = group[0]
         series.setdefault((metric, arm), []).append(
-            (first["p_place"], stage, _mean(r["value"] for r in group), first["p_func"]))
+            (first["p_place"], stage, mean(r["value"] for r in group), first["p_func"]))
     for points in series.values():
         points.sort()
     return series
@@ -285,20 +299,20 @@ def lane_plot_spec(rows: list[dict], *, title: str | None = None, kind: str = "l
     metrics = list(dict.fromkeys(r["metric"] for r in rows))      # input order, never a hardcoded list
     arms = list(dict.fromkeys(r["arm"] for r in rows))
     series = aggregate(rows)
-    native = "VAR scale si" if models == ["var"] else ("DiT timestep" if models == ["dit"] else "native stage")
+    native = native_label(models)
 
     panels = []
     for metric in metrics:
         metric_rows = [r for r in rows if r["metric"] == metric]
-        spec = MetricSpec(metric, metric_rows[0]["direction"], metric_rows[0]["level"])
+        spec = MetricSpec(metric, metric_rows[0]["direction"], metric_rows[0]["level"],
+                          label=metric_rows[0].get("label") or metric)
         panel_series = []
         for arm in arms:
             points = series.get((metric, arm))
             if not points:
                 continue
             panel_series.append({"label": arm, "kind": kind,
-                                 "points": [(p, v) for p, _s, v, _f in points],
-                                 "stages": [s for _p, s, _v, _f in points]})
+                                 "points": [(p, v) for p, _s, v, _f in points]})
         ticks = sorted({(p, str(stage)) for arm in arms
                         for p, stage, _v, _f in series.get((metric, arm), [])})
         panels.append({"title": metric, "y_label": spec.axis_label, "series": panel_series,
@@ -323,8 +337,8 @@ def thin_ticks(ticks: list, limit: int = 12) -> list:
 
 def available_backends() -> list[str]:
     import importlib.util
-    return [name for name, module in (("matplotlib", "matplotlib"), ("pillow", "PIL"))
-            if importlib.util.find_spec(module) is not None]
+    modules = {"matplotlib": "matplotlib", "pillow": "PIL"}
+    return [name for name in BACKENDS if importlib.util.find_spec(modules[name]) is not None]
 
 
 def render(spec: dict, out_path, *, backend: str = "auto", size=(1100, 420)) -> Path:
@@ -339,8 +353,8 @@ def render(spec: dict, out_path, *, backend: str = "auto", size=(1100, 420)) -> 
                 "docs/HANDOVER.md forbids an unannounced pip install), or install Pillow, which both "
                 "env files already list. The data layer (tidy_from_run / write_tidy) needs neither.")
         backend = have[0]
-    if backend not in ("matplotlib", "pillow"):
-        raise PlotError(f"backend must be 'auto', 'matplotlib' or 'pillow', got {backend!r}")
+    if backend not in BACKENDS:
+        raise PlotError(f"backend must be 'auto' or one of {BACKENDS}, got {backend!r}")
     if backend not in have:
         package = "matplotlib" if backend == "matplotlib" else "Pillow"
         raise PlotBackendMissing(
@@ -401,7 +415,7 @@ def _render_matplotlib(spec: dict, out_path: Path, size) -> Path:
                        width=width, label=s["label"], color=colour)
             else:
                 ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.4, label=s["label"], color=colour)
-        ax.set_xlim(*spec.get("x_range", (0.0, 1.0)))
+        ax.set_xlim(*spec["x_range"])
         ax.set_ylim(*_series_range(panel))
         ax.set_xticks([p for p, _l in panel["x_ticks"]])
         ax.set_xticklabels([l for _p, l in panel["x_ticks"]], fontsize=6.5, rotation=45)
@@ -446,7 +460,7 @@ def _render_pillow(spec: dict, out_path: Path, size) -> Path:
         y0, y1 = pad_t, H - pad_b
         lo, hi = _series_range(panel)
 
-        xlo, xhi = spec.get("x_range", (0.0, 1.0))
+        xlo, xhi = spec["x_range"]
         xspan = (xhi - xlo) or 1.0
 
         def px(p):

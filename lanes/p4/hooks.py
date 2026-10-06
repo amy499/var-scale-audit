@@ -33,6 +33,7 @@ import sys
 
 sys.dont_write_bytecode = True
 
+from lanes.p4.arms import ENV_LAMBDA, ENV_LOG, ENV_STAGES  # noqa: E402
 from runner.hooks import Modify, Observe  # noqa: E402
 
 DEFAULT_LAMBDA = 0.0
@@ -43,27 +44,27 @@ class HookConfigError(RuntimeError):
 
 
 def _stages() -> list[int]:
-    raw = os.environ.get("P4_STAGES")
+    raw = os.environ.get(ENV_STAGES)
     if raw is None:
-        raise HookConfigError("P4_STAGES is not set; a P4 arm hook needs an explicit stage list "
+        raise HookConfigError(f"{ENV_STAGES} is not set; a P4 arm hook needs an explicit stage list "
                               "(build it with lanes/p4/arms.py)")
     try:
         stages = [int(part) for part in raw.replace(" ", "").split(",") if part]
     except ValueError as e:
-        raise HookConfigError(f"P4_STAGES={raw!r} is not a comma-separated list of integers") from e
+        raise HookConfigError(f"{ENV_STAGES}={raw!r} is not a comma-separated list of integers") from e
     if not stages:
-        raise HookConfigError("P4_STAGES is empty; the hook would never fire")
+        raise HookConfigError(f"{ENV_STAGES} is empty; the hook would never fire")
     return stages
 
 
 def _lambda() -> float:
-    raw = os.environ.get("P4_LAMBDA", str(DEFAULT_LAMBDA))
+    raw = os.environ.get(ENV_LAMBDA, str(DEFAULT_LAMBDA))
     try:
         lam = float(raw)
     except ValueError as e:
-        raise HookConfigError(f"P4_LAMBDA={raw!r} is not a number") from e
+        raise HookConfigError(f"{ENV_LAMBDA}={raw!r} is not a number") from e
     if not 0.0 <= lam <= 1.0:
-        raise HookConfigError(f"P4_LAMBDA={lam} is outside [0, 1]; 0 removes the scale's "
+        raise HookConfigError(f"{ENV_LAMBDA}={lam} is outside [0, 1]; 0 removes the scale's "
                               "contribution, 1 is the baseline")
     return lam
 
@@ -90,10 +91,14 @@ def severity_blend(lam: float):
 
 
 def trace(model, stage, p, when, state):
-    """Optional observer: one JSON line per call to P4_LOG. Never writes a tensor."""
-    path = os.environ.get("P4_LOG")
+    """Optional observer: one JSON line per call to P4_LOG. Never writes a tensor.
+
+    Debug only. It reopens the log and forces a device sync on every call, so `trace_all` on DiT
+    fires 250x per side per batch -- never register it on a run whose numbers are a result.
+    """
+    path = os.environ.get(ENV_LOG)
     if not path:
-        raise HookConfigError("P4_LOG is not set; the trace observer needs an absolute output path")
+        raise HookConfigError(f"{ENV_LOG} is not set; the trace observer needs an absolute output path")
     latent = state.f_hat if model == "var" else state.x
     record = {"model": model, "stage": stage, "p": p, "when": when, "n_rows": len(state.rows),
               "fields": state.fields, "latent_absmax": float(latent.abs().max())}
@@ -101,10 +106,14 @@ def trace(model, stage, p, when, state):
         f.write(json.dumps(record) + "\n")
 
 
+def _var_degrade() -> Modify:
+    lam = _lambda()
+    return Modify(severity_blend(lam), when="after", stages=_stages(), name=f"p4_var_degrade_lambda{lam:g}")
+
+
 _BUILD = {
     # name -> how to build it when runner.generate asks for it by name
-    "var_degrade": lambda: Modify(severity_blend(_lambda()), when="after", stages=_stages(),
-                                  name=f"p4_var_degrade_lambda{_lambda():g}"),
+    "var_degrade": _var_degrade,
     "trace_after": lambda: Observe(trace, when="after", stages=_stages(), name="p4_trace_after"),
     "trace_all": lambda: Observe(trace, when="after", name="p4_trace_all"),
 }

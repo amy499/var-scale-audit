@@ -31,13 +31,13 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from lanes.p4 import arms, plotting  # noqa: E402
+from lanes.p4 import arms, plotting, progress  # noqa: E402
 from lanes.p4.verify_pairing import find_runs  # noqa: E402
 
 VAR_NO_SAVING = "VAR: no compute saving - the intervention runs after the transformer pass"
 
 
-def _metrics_rows(run_dir: Path, metric: str) -> list[float]:
+def _metric_values(run_dir: Path, metric: str) -> list[float]:
     path = run_dir / "metrics.csv"
     if not path.is_file():
         raise SystemExit(f"{path} does not exist; run lanes/p4/metric_placeholder.py first "
@@ -50,7 +50,7 @@ def collect(pilot_root, metric: str) -> dict:
     """{model, points per arm as (fraction, mean value), measured savings, budgets} for one model."""
     pilot_root = Path(pilot_root)
     baseline, arm_dirs = find_runs(pilot_root)
-    base_run = json.loads((baseline / "run.json").read_text())
+    base_run = progress.load_run(baseline)
     model = base_run["model"]
     base_seconds = base_run["seconds"]["sample"]
 
@@ -60,22 +60,22 @@ def collect(pilot_root, metric: str) -> dict:
         if not info_path.is_file():
             raise SystemExit(f"{info_path} does not exist; this run was not produced by lanes/p4/pilot.py")
         info = json.loads(info_path.read_text())
-        values = _metrics_rows(d, metric)
+        values = _metric_values(d, metric)
         if not values:
             raise SystemExit(f"{d / 'metrics.csv'} has no rows for metric {metric!r}")
         fraction = info["fraction"]
-        points.setdefault(info["arm"], []).append((fraction, sum(values) / len(values)))
+        points.setdefault(info["arm"], []).append((fraction, plotting.mean(values)))
         seen_m.add(info["m"])
         # Only DiT actually removes model evaluations; a VAR "saving" would be timing noise, so it is
         # not computed at all rather than computed and quietly not shown.
-        if info["arm"] != "baseline" and model == "dit":
-            seconds = json.loads((d / "run.json").read_text())["seconds"]["sample"]
+        if info["arm"] != arms.BASELINE and model == "dit":
+            seconds = progress.load_run(d)["seconds"]["sample"]
             savings.setdefault(fraction, []).append(1.0 - seconds / base_seconds if base_seconds else 0.0)
 
     # The baseline is the reference at every budget, so it is drawn flat across the axis.
-    base_value = points["baseline"][0][1]
+    base_value = points[arms.BASELINE][0][1]
     widest = max(f for series in points.values() for f, _v in series)
-    points["baseline"] = [(0.0, base_value), (widest, base_value)]
+    points[arms.BASELINE] = [(0.0, base_value), (widest, base_value)]
     for series in points.values():
         series.sort()
     return {"model": model, "points": points, "budgets": sorted(seen_m - {0}),
@@ -90,8 +90,7 @@ def figure4_spec(collected: list[dict], spec: "plotting.MetricSpec",
         series = []
         for arm in arms.ARMS:
             if arm in c["points"]:
-                series.append({"label": arm, "kind": "line", "points": c["points"][arm],
-                               "stages": []})
+                series.append({"label": arm, "kind": "line", "points": c["points"][arm]})
         if c["model"] == "dit" and c["savings"]:
             saving = "  ".join(f"m/n {f:.2f}: {s * 100:.0f}%" for f, s in sorted(c["savings"].items()))
             note = f"DiT measured sampling-time saving - {saving}"
@@ -113,8 +112,8 @@ def figure4(pilot_roots, out_path, *, metric: str = "p4_placeholder_rel_l2", bac
             metric_spec=None) -> Path:
     if metric_spec is None:
         from lanes.p4.metric_placeholder import metric_specs
-        matches = [s for s in metric_specs() if s.name == metric]
-        metric_spec = matches[0] if matches else plotting.MetricSpec(metric)
+        metric_spec = next((s for s in metric_specs() if s.name == metric),
+                           plotting.MetricSpec(metric))
     collected = [collect(Path(root), metric) for root in pilot_roots]
     spec = figure4_spec(collected, metric_spec)
     size = (520 * len(collected) + 140, 460)
@@ -126,7 +125,7 @@ def main(argv=None):
     ap.add_argument("pilot_roots", nargs="+", type=Path, help="one pilot root per model")
     ap.add_argument("--out", type=Path, default=Path("outputs/p4/figure4_draft.png"))
     ap.add_argument("--metric", default="p4_placeholder_rel_l2")
-    ap.add_argument("--backend", default="auto", choices=("auto", "matplotlib", "pillow"))
+    ap.add_argument("--backend", default="auto", choices=("auto", *plotting.BACKENDS))
     args = ap.parse_args(argv)
     print(f"wrote {figure4(args.pilot_roots, args.out, metric=args.metric, backend=args.backend)}")
     return 0

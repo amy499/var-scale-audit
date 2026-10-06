@@ -135,7 +135,7 @@ def map_run(run: dict) -> list[dict]:
 
 
 def _check_axes(model: str, mapped: list[dict]):
-    """Both axes are bounded in [0, 1] and non-decreasing in sampling order (R5)."""
+    """Both axes are bounded in [0, 1] and non-decreasing in sampling order."""
     for axis in ("p_place", "p_func"):
         values = [row[axis] for row in mapped]
         for i, v in enumerate(values):

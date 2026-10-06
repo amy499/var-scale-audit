@@ -56,11 +56,9 @@ def figure5_spec(lane_tables, *, title: str = "Figure 5: stage importance across
         for (metric, arm), points in sorted(series.items()):
             xs = [(p, v) for p, _s, v, _f in points]
             panel_series.append({"label": arm if len(metrics) == 1 else f"{metric} / {arm}",
-                                 "kind": kind, "points": _normalize(xs, lo, hi),
-                                 "stages": [s for _p, s, _v, _f in points]})
+                                 "kind": kind, "points": _normalize(xs, lo, hi)})
             ticks.update((p, str(s)) for p, s, _v, _f in points)
-        direction = rows[0]["direction"]
-        arrow = "higher is better" if direction == "higher_is_better" else "lower is better"
+        arrow = plotting.direction_phrase(rows[0]["direction"])
         panels.append({"title": label,
                        "y_label": f"{', '.join(metrics)} normalized in-panel "
                                   f"(actual {lo:.3g}-{hi:.3g}, {arrow})",
@@ -68,13 +66,12 @@ def figure5_spec(lane_tables, *, title: str = "Figure 5: stage importance across
                        "x_ticks": plotting.thin_ticks(sorted(ticks), limit=8),
                        "value_range": (lo, hi), "metrics": metrics})
 
-    native = {"var": "VAR scale si", "dit": "DiT timestep"}.get(
-        next(iter(models)) if len(models) == 1 else None, "native stage")
     notes = plotting.band_annotation([r for _l, rows in lane_tables for r in rows]) if len(models) == 1 \
         else {band: "" for band in bands.BANDS}
     return {"title": title,
-            "x_label": f"normalized progress p_place  (ticks: {native})",
+            "x_label": f"normalized progress p_place  (ticks: {plotting.native_label(models)})",
             "panels": panels, "bands": dict(plotting.BAND_EXTENTS), "band_notes": notes,
+            "x_range": (0.0, 1.0),
             "footnote": "one panel per lane, each normalized within itself and labelled with its own "
                         "actual range; lanes are not averaged, ranked or reconciled"}
 
@@ -92,7 +89,7 @@ def main(argv=None):
     ap.add_argument("out", type=Path, help="output image path")
     ap.add_argument("--lane", action="append", default=[], metavar="LABEL=TIDY.csv",
                     help="a lane's label and its tidy table (repeatable; lanes/p4/PLOTTING.md)")
-    ap.add_argument("--backend", default="auto", choices=("auto", "matplotlib", "pillow"))
+    ap.add_argument("--backend", default="auto", choices=("auto", *plotting.BACKENDS))
     args = ap.parse_args(argv)
     if not args.lane:
         ap.error("give at least one --lane LABEL=TIDY.csv")

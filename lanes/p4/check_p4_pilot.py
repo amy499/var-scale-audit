@@ -33,7 +33,7 @@ sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from lanes.p4 import arms, bands, fixtures, progress  # noqa: E402
+from lanes.p4 import arms, bands, fixtures, pilot, progress  # noqa: E402
 from lanes.p4.check_p4_shared import Checks  # noqa: E402
 
 HOOK_FILE = "lanes/p4/hooks.py"
@@ -183,9 +183,11 @@ def check_hook_unit(c: Checks):
              lambda: mod.severity_blend(0.0)("dit", 2, 0.5, "after", base), "VAR only")
     c.raises("the hook refuses the 'before' side",
              lambda: mod.severity_blend(0.0)("var", 2, 0.5, "before", base), "after(si)")
-    c.raises("P4_LAMBDA outside [0, 1] is rejected", lambda: _build(mod, stages="2", lam="1.5"), "outside")
-    c.raises("P4_STAGES must be set", lambda: _build(mod, stages=None, lam="0"), "P4_STAGES")
-    c.raises("P4_STAGES must be integers", lambda: _build(mod, stages="early", lam="0"), "P4_STAGES")
+    c.raises(f"{arms.ENV_LAMBDA} outside [0, 1] is rejected",
+             lambda: _build(mod, stages="2", lam="1.5"), "outside")
+    c.raises(f"{arms.ENV_STAGES} must be set", lambda: _build(mod, stages=None, lam="0"), arms.ENV_STAGES)
+    c.raises(f"{arms.ENV_STAGES} must be integers",
+             lambda: _build(mod, stages="early", lam="0"), arms.ENV_STAGES)
     hook = _build(mod, stages="3,4,5", lam="0")
     c.equal("the built hook fires at after(si) on its arm's stages only",
             (hook.when, hook.stages), ("after", (3, 4, 5)))
@@ -193,12 +195,12 @@ def check_hook_unit(c: Checks):
 
 
 def _build(mod, stages, lam):
-    old = {k: os.environ.get(k) for k in ("P4_STAGES", "P4_LAMBDA")}
+    old = {k: os.environ.get(k) for k in (arms.ENV_STAGES, arms.ENV_LAMBDA)}
     try:
-        os.environ.pop("P4_STAGES", None)
+        os.environ.pop(arms.ENV_STAGES, None)
         if stages is not None:
-            os.environ["P4_STAGES"] = stages
-        os.environ["P4_LAMBDA"] = lam
+            os.environ[arms.ENV_STAGES] = stages
+        os.environ[arms.ENV_LAMBDA] = lam
         return mod.var_degrade
     finally:
         for k, v in old.items():
@@ -212,15 +214,11 @@ def _build(mod, stages, lam):
 def _generate(work: Path, config: Path, tag: str, manifest: Path, hook=None, env_extra=None,
               skip=()) -> dict:
     out = work / tag
-    cmd = [sys.executable, "-m", "runner.generate", "--config", str(config), "--manifest", str(manifest),
-           "--batch-size", "4", "--out-dir", str(out)]
-    if hook:
-        cmd += ["--hook", hook]
-    if skip:
-        cmd += ["--skip-timesteps", *[str(s) for s in skip]]
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", **(env_extra or {})}
-    for key in ("P4_STAGES", "P4_LAMBDA", "P4_LOG", "PHASE3_STAGE", "PHASE3_LOG"):
-        if not (env_extra or {}).get(key):      # a stale value would retarget someone else's hook
+    cmd = pilot._cmd(config, manifest, out, hook=hook, skip=skip, batch_size=4)
+    env_extra = env_extra or {}
+    env = pilot.clean_env(env_extra)
+    for key in ("PHASE3_STAGE", "PHASE3_LOG"):
+        if key not in env_extra:                # a stale value would retarget phase 3's own hooks
             env.pop(key, None)
     r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, env=env)
     if r.returncode != 0:
@@ -244,11 +242,11 @@ def check_tiny_runs(c: Checks, tiny_dir: Path, work: Path):
     stage = 2            # one scale, so the single-stage reference hook can target the same one
     base = _generate(work, config, "baseline", manifest)
     lam0 = _generate(work, config, "p4_lambda0", manifest, hook=f"{HOOK_FILE}:var_degrade",
-                     env_extra={"P4_STAGES": str(stage), "P4_LAMBDA": "0"})
+                     env_extra={arms.ENV_STAGES: str(stage), arms.ENV_LAMBDA: "0"})
     lam1 = _generate(work, config, "p4_lambda1", manifest, hook=f"{HOOK_FILE}:var_degrade",
-                     env_extra={"P4_STAGES": str(stage), "P4_LAMBDA": "1"})
+                     env_extra={arms.ENV_STAGES: str(stage), arms.ENV_LAMBDA: "1"})
     half = _generate(work, config, "p4_lambda_half", manifest, hook=f"{HOOK_FILE}:var_degrade",
-                     env_extra={"P4_STAGES": str(stage), "P4_LAMBDA": "0.5"})
+                     env_extra={arms.ENV_STAGES: str(stage), arms.ENV_LAMBDA: "0.5"})
     ref = _generate(work, config, "ref_restore_all", manifest, hook=f"{REF_HOOK_FILE}:restore_all_after",
                     env_extra={"PHASE3_STAGE": str(stage)})
 
@@ -280,11 +278,11 @@ def check_tiny_runs(c: Checks, tiny_dir: Path, work: Path):
     tiny_stages = base["stages"]
     plan = arms.arm_plan("var", tiny_stages, "late", 1)
     damage = _generate(work, config, "arm_damage", manifest, hook=f"{HOOK_FILE}:var_degrade",
-                       env_extra={"P4_STAGES": ",".join(str(s) for s in plan["damage"]["stages"]),
-                                  "P4_LAMBDA": "0"})
+                       env_extra={arms.ENV_STAGES: ",".join(str(s) for s in plan["damage"]["stages"]),
+                                  arms.ENV_LAMBDA: "0"})
     protect = _generate(work, config, "arm_protect", manifest, hook=f"{HOOK_FILE}:var_degrade",
-                        env_extra={"P4_STAGES": ",".join(str(s) for s in plan["protect"]["stages"]),
-                                   "P4_LAMBDA": "0"})
+                        env_extra={arms.ENV_STAGES: ",".join(str(s) for s in plan["protect"]["stages"]),
+                                   arms.ENV_LAMBDA: "0"})
     c.equal("a damage arm run stays paired", _hashes(damage, "generator_state_sha256"),
             _hashes(base, "generator_state_sha256"))
     c.equal("a protect arm run stays paired", _hashes(protect, "generator_state_sha256"),

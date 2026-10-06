@@ -31,8 +31,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from lanes.p2.schema import check_pairing, load_run  # noqa: E402
-
-BASELINE_NAMES = ("baseline",)
+from lanes.p4.arms import BASELINE  # noqa: E402
 
 
 def _key(row: dict) -> tuple:
@@ -77,9 +76,9 @@ def find_runs(root) -> tuple[Path, list[Path]]:
     run_dirs = sorted({p.parent for p in root.rglob("run.json")})
     if not run_dirs:
         raise SystemExit(f"no run.json under {root}")
-    baselines = [d for d in run_dirs if d.name in BASELINE_NAMES]
+    baselines = [d for d in run_dirs if d.name == BASELINE]
     if len(baselines) != 1:
-        raise SystemExit(f"expected exactly one directory named {BASELINE_NAMES[0]!r} under {root}, "
+        raise SystemExit(f"expected exactly one directory named {BASELINE!r} under {root}, "
                          f"found {[str(d) for d in baselines]}; pass --baseline explicitly")
     return baselines[0], [d for d in run_dirs if d != baselines[0]]
 

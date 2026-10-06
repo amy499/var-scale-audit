@@ -1,7 +1,7 @@
 """P4 self-check for the shared deliverable: the progress mapping, the frozen bands and the template.
 
 Run from the repo root. Standard library plus PyYAML. No torch, no GPU, no checkpoint, and
-deliberately **no plotting library** -- the data layer must work without one (R11).
+deliberately **no plotting library** -- the data layer must work without one.
 
     python lanes/p4/check_p4_shared.py
     python lanes/p4/check_p4_shared.py --runs DIR     # also check against real run.json dirs under DIR
@@ -90,7 +90,8 @@ def check_progress(c: Checks):
         c.close(f"dit step {j} placement", dit[j]["p_place"], p_place)
         c.close(f"dit step {j} functional", dit[j]["p_func"], p_func)
 
-    # Generality (R4): no hardcoded 10-scale or 680-token constant, and a schedule that is not 250 steps.
+    # No hardcoded 10-scale or 680-token constant, and a schedule that is not 250 steps, so the
+    # mapping holds for VAR d16-d30 and for the tiny CPU models.
     tiny_var = progress.map_stages("var", fixtures.var_stages(TINY_PATCH_NUMS))
     c.equal("tiny var maps 4 scales", len(tiny_var), 4)
     c.equal("tiny var total tokens is 30", tiny_var[-1]["total_tokens"], 30)
@@ -109,7 +110,7 @@ def check_progress(c: Checks):
     one_dit = progress.map_stages("dit", fixtures.dit_stages(1))
     c.close("single-step dit placement is 1.0", one_dit[0]["p_place"], 1.0, 0)
 
-    # Monotonic non-decreasing in sampling order, on every fixture (R5).
+    # Monotonic non-decreasing in sampling order, on every fixture.
     for label, model, stages in (("var d20", "var", fixtures.frozen_stages("var")),
                                  ("dit 250", "dit", fixtures.frozen_stages("dit")),
                                  ("var tiny", "var", fixtures.var_stages(TINY_PATCH_NUMS)),
@@ -190,7 +191,8 @@ def check_bands(c: Checks):
     c.that("tiny dit has three non-empty bands",
            all(any(r["band"] == b for r in tiny_dit) for b in bands.BANDS))
 
-    # The numbers that rejected the alternatives (R17), recomputed rather than quoted.
+    # The numbers that rejected the alternatives, recomputed rather than quoted from
+    # lanes/p4/comparison_logic.md, so the document cannot drift from the code.
     var_mapped = progress.map_stages("var", fixtures.frozen_stages("var"))
     token_bands = {b: [r["stage"] for r in bands.assign_bands(var_mapped, basis="p_func") if r["band"] == b]
                    for b in bands.BANDS}
@@ -240,9 +242,19 @@ def check_template(c: Checks):
                                           "direction", "level"})
     c.equal("band of si 4 is middle", {r["band"] for r in tidy if r["stage"] == 4}, {"middle"})
 
-    # Metric names, labels and directions come from the input, never from a hardcoded list (R10).
+    # Metric names, labels and directions come from the input, never from a hardcoded list, so P3's
+    # final metric definitions drop in without a template change (lanes/p4/PLOTTING.md section 3).
     spec = plotting.lane_plot_spec(tidy, title="two metrics")
     c.equal("one panel per input metric", [p["title"] for p in spec["panels"]], ["lpips", "clip_sim"])
+    c.equal("the tidy table carries each metric's label",
+            {r["metric"]: r["label"] for r in tidy}, {"lpips": "lpips", "clip_sim": "clip_sim"})
+    labelled = plotting.tidy_from_run(
+        var_run, metric_rows(var_stages, ["lpips"]),
+        [plotting.MetricSpec("lpips", direction="lower_is_better", label="perceptual distance")],
+        arm="baseline", lane="p4")
+    c.that("a MetricSpec label reaches the axis rather than being dropped",
+           "perceptual distance" in plotting.lane_plot_spec(labelled)["panels"][0]["y_label"],
+           plotting.lane_plot_spec(labelled)["panels"][0]["y_label"])
     c.that("panel label carries the metric's own direction",
            "lower is better" in spec["panels"][0]["y_label"]
            and "higher is better" in spec["panels"][1]["y_label"],
@@ -483,28 +495,23 @@ def check_real_runs(c: Checks, root: Path):
         c.that(f"{label}: maps without error", True)
         if run.get("skip_timesteps"):
             continue   # a skip run's table is checked against its own baseline, not rebuilt here
-        if model == "var":
-            reference = fixtures.var_stages(run["build"]["patch_nums"])
-        else:
-            reference = fixtures.dit_stages(run["sampler"]["num_sampling_steps"])
         c.equal(f"{label}: fixtures reproduce the runner's stages table bit-for-bit",
-                run["stages"], reference)
+                run["stages"], fixtures.stages_for_settings(run, str(run_json))[1])
 
 
 def check_skip_pairing(c: Checks, root: Path):
-    """A --skip-timesteps run keeps the placement value of every timestep it still has (R4)."""
-    pairs = []
+    """A --skip-timesteps run keeps the placement value of every timestep it still has."""
+    pairs, baselines = [], {}
     for run_json in sorted(root.rglob("run.json")):
         run = progress.load_run(run_json)
-        if progress.model_of(run) == "dit" and run.get("skip_timesteps"):
+        if progress.model_of(run) != "dit":
+            continue
+        if run.get("skip_timesteps"):
             pairs.append((run_json, run))
+        else:
+            baselines[run["sampler"]["num_sampling_steps"]] = progress.map_run(run)
     if not pairs:
         return
-    baselines = {}
-    for run_json in sorted(root.rglob("run.json")):
-        run = progress.load_run(run_json)
-        if progress.model_of(run) == "dit" and not run.get("skip_timesteps"):
-            baselines[run["sampler"]["num_sampling_steps"]] = progress.map_run(run)
     for run_json, run in pairs:
         steps = run["sampler"]["num_sampling_steps"]
         base = baselines.get(steps)

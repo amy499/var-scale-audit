@@ -35,7 +35,6 @@ if str(REPO) not in sys.path:
 
 from lanes.p4 import arms, bands, fixtures  # noqa: E402
 
-DEFAULT_CONFIG = {"var": "configs/var_d20.yaml", "dit": "configs/dit_xl2_256.yaml"}
 DEFAULT_MANIFEST = "manifest/provisional_4x4.csv"
 BATCH_SIZE = 16                      # one batch size per experiment (docs/HANDOVER.md section 3)
 FRACTIONS = (0.1, 0.2, 0.3)
@@ -58,18 +57,19 @@ def plan_runs(model: str, band: str, config: Path, manifest: Path, out_root: Pat
         raise ValueError(f"{config} is a {cfg_model} config but --model is {model}")
     budgets = arms.budget_grid(model, stages, band, fractions)
 
-    runs = [{"arm": "baseline", "m": 0, "band": band, "out_dir": str(out_root / "baseline"),
-             "record": arms.arm_plan(model, stages, band, budgets[0], seed=seed)["baseline"],
-             "cmd": _cmd(config, manifest, out_root / "baseline"), "env": {}}]
+    plans = {m: arms.arm_plan(model, stages, band, m, seed=seed) for m in budgets}
+    runs = [{"arm": arms.BASELINE, "m": 0, "band": band, "out_dir": str(out_root / arms.BASELINE),
+             "record": plans[budgets[0]][arms.BASELINE],
+             "cmd": _cmd(config, manifest, out_root / arms.BASELINE), "env": {}}]
     for m in budgets:
-        plan = arms.arm_plan(model, stages, band, m, seed=seed)
+        plan = plans[m]
         for arm in arms.INTERVENED_ARMS:
             record = plan[arm]
             out_dir = out_root / f"{arm}_m{m}"
             if model == "var":
                 cmd = _cmd(config, manifest, out_dir, hook=HOOK)
-                env = {"P4_STAGES": ",".join(str(s) for s in record["stages"]),
-                       "P4_LAMBDA": f"{arms.VAR_GATE_B_LAMBDA:g}"}
+                env = {arms.ENV_STAGES: ",".join(str(s) for s in record["stages"]),
+                       arms.ENV_LAMBDA: f"{arms.VAR_GATE_B_LAMBDA:g}"}
             else:
                 cmd = _cmd(config, manifest, out_dir, skip=record["stages"])
                 env = {}
@@ -78,9 +78,20 @@ def plan_runs(model: str, band: str, config: Path, manifest: Path, out_root: Pat
     return runs
 
 
-def _cmd(config: Path, manifest: Path, out_dir: Path, hook=None, skip=()) -> list[str]:
+def clean_env(extra: dict | None = None) -> dict:
+    """The environment a generate call runs in: this process's, minus any stale arm variables."""
+    extra = extra or {}
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", **extra}
+    for key in arms.ARM_ENV:
+        if key not in extra:
+            env.pop(key, None)
+    return env
+
+
+def _cmd(config: Path, manifest: Path, out_dir: Path, hook=None, skip=(),
+         batch_size: int = BATCH_SIZE) -> list[str]:
     cmd = [sys.executable, "-m", "runner.generate", "--config", str(config),
-           "--manifest", str(manifest), "--batch-size", str(BATCH_SIZE), "--out-dir", str(out_dir)]
+           "--manifest", str(manifest), "--batch-size", str(batch_size), "--out-dir", str(out_dir)]
     if hook:
         cmd += ["--hook", hook]
     if skip:
@@ -100,7 +111,8 @@ def describe(runs: list[dict]) -> str:
 
 
 def run_all(runs: list[dict], out_root: Path, dry_run: bool = False) -> int:
-    out_root.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        out_root.mkdir(parents=True, exist_ok=True)
     commit = git_describe()
     failures = 0
     for i, r in enumerate(runs, 1):
@@ -109,12 +121,8 @@ def run_all(runs: list[dict], out_root: Path, dry_run: bool = False) -> int:
         print("   " + " ".join(r["cmd"]), flush=True)
         if dry_run:
             continue
-        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", **r["env"]}
-        for key in ("P4_STAGES", "P4_LAMBDA", "P4_LOG"):
-            if key not in r["env"]:
-                env.pop(key, None)
         t0 = time.time()
-        proc = subprocess.run(r["cmd"], cwd=REPO, env=env)
+        proc = subprocess.run(r["cmd"], cwd=REPO, env=clean_env(r["env"]))
         seconds = round(time.time() - t0, 1)
         if proc.returncode != 0:
             print(f"   FAILED (exit {proc.returncode}) after {seconds}s", flush=True)
@@ -148,7 +156,7 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="with 'run': print the commands only")
     args = ap.parse_args(argv)
 
-    config = args.config or REPO / DEFAULT_CONFIG[args.model]
+    config = args.config or fixtures.CONFIGS[args.model]
     out_root = args.out_root or REPO / "outputs" / "p4" / "pilot" / args.model
     runs = plan_runs(args.model, args.band, config, args.manifest, out_root,
                      fractions=tuple(args.fractions), seed=args.seed)

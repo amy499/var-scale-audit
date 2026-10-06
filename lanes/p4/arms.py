@@ -39,13 +39,18 @@ if str(REPO) not in sys.path:
 
 from lanes.p4 import bands, fixtures, progress  # noqa: E402
 
-ARMS = ("baseline", "protect", "damage", "control")
+BASELINE = "baseline"
+ARMS = (BASELINE, "protect", "damage", "control")
 INTERVENED_ARMS = ("protect", "damage", "control")
 
 # Gate B runs every VAR arm at lambda = 0: the only severity with a tested precedent in the repo
 # (scripts/phase3/hooks_lib.py restore_all) and the only one whose intent maps onto a removed DiT step.
 VAR_GATE_B_LAMBDA = 0.0
 CONTROL_SEED = 20261006        # fixed, recorded, and reported with every control arm
+# The environment an arm's VAR hook reads (lanes/p4/hooks.py). Named here so the pilot driver can set
+# them without importing the hook module, which would pull torch into a process that only shells out.
+ENV_STAGES, ENV_LAMBDA, ENV_LOG = "P4_STAGES", "P4_LAMBDA", "P4_LOG"
+ARM_ENV = (ENV_STAGES, ENV_LAMBDA, ENV_LOG)
 REDRAW_ATTEMPTS = 64           # successive seeds tried before a control arm is called degenerate
 
 
@@ -53,10 +58,10 @@ class ArmError(ValueError):
     """An arm that cannot be built, with the numbers that make it impossible named."""
 
 
-def _ordered_stages(model: str, stages) -> list[int]:
-    """Native stage ids in sampling order, from a stages table or an already-mapped list."""
-    mapped = progress.map_stages(model, stages)
-    return [row["stage"] for row in mapped]
+def _band_context(model: str, stages, band: str) -> tuple[list[int], set]:
+    """(native stage ids in sampling order, the stages of `band`) from one mapping of the table."""
+    mapped = bands.assign_bands(progress.map_stages(model, stages))
+    return [row["stage"] for row in mapped], {row["stage"] for row in mapped if row["band"] == band}
 
 
 def first_step_excluded(model: str, ordered: list[int]) -> tuple[int, ...]:
@@ -179,12 +184,9 @@ def arm_plan(model: str, stages, band: str, m: int, *, seed: int = CONTROL_SEED,
                        "Interior severities belong to the deferred severity sweep "
                        "(lanes/p4/comparison_logic.md section 5).")
 
-    ordered = _ordered_stages(model, stages)
-    n = len(ordered)
+    ordered, in_band = _band_context(model, stages, band)
+    n, k = len(ordered), len(in_band)
     position = {stage: i for i, stage in enumerate(ordered)}
-    mapped = bands.assign_bands(progress.map_stages(model, stages))
-    in_band = {row["stage"] for row in mapped if row["band"] == band}
-    k = len(in_band)
 
     damage_eligible = eligible(model, ordered, inside=in_band)
     if m > len(damage_eligible):
@@ -224,13 +226,14 @@ def arm_plan(model: str, stages, band: str, m: int, *, seed: int = CONTROL_SEED,
                            "equal budget would not mean equal window structure")
 
     sets = {"baseline": [], "damage": damage, "protect": protect, "control": control}
-    out = {arm: arm_record(model, arm, band, sets[arm], ordered, n, k, lam, used_seed) for arm in ARMS}
+    out = {arm: arm_record(model, arm, band, sets[arm], ordered, k, lam, used_seed) for arm in ARMS}
     out["control"]["degenerate"] = degenerate
     return out
 
 
-def arm_record(model: str, arm: str, band: str, stages_selected, ordered, n: int, k: int,
+def arm_record(model: str, arm: str, band: str, stages_selected, ordered, k: int,
                lam: float, seed: int) -> dict:
+    n = len(ordered)
     position = {stage: i for i, stage in enumerate(ordered)}
     selected = sorted(stages_selected, key=lambda s: position[s])
     positions = [position[s] for s in selected]
@@ -250,9 +253,7 @@ def arm_stages(model: str, stages, band: str, m: int, arm: str, **kw) -> dict:
 
 def budget_grid(model: str, stages, band: str, fractions=(0.1, 0.2, 0.3)) -> list[int]:
     """The budgets a fraction sweep asks for, rounded to whole stages and capped at the band."""
-    ordered = _ordered_stages(model, stages)
-    mapped = bands.assign_bands(progress.map_stages(model, stages))
-    in_band = {row["stage"] for row in mapped if row["band"] == band}
+    ordered, in_band = _band_context(model, stages, band)
     ceiling = len(eligible(model, ordered, inside=in_band))
     out = []
     for f in fractions:

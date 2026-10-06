@@ -17,6 +17,8 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
+import yaml  # noqa: E402 - PyYAML only, the one dependency runner/config.py itself has
+
 REPO = Path(__file__).resolve().parents[2]
 CONFIGS = {"var": REPO / "configs" / "var_d20.yaml", "dit": REPO / "configs" / "dit_xl2_256.yaml"}
 
@@ -27,7 +29,6 @@ ORIGINAL_STEPS = 1000   # the trained schedule DiT respaces down to num_sampling
 
 def frozen_config(model: str) -> dict:
     """The frozen config for `model`, so fixtures cannot drift from configs/ (docs/HANDOVER.md section 3)."""
-    import yaml
     if model not in CONFIGS:
         raise ValueError(f"model must be one of {tuple(CONFIGS)}, got {model!r}")
     return yaml.safe_load(CONFIGS[model].read_text())
@@ -62,12 +63,17 @@ def linear_betas(original_steps: int = ORIGINAL_STEPS) -> list[float]:
     return betas
 
 
-def alphas_cumprod(original_steps: int = ORIGINAL_STEPS) -> list[float]:
+def _cumprod_one_minus(betas) -> list[float]:
+    """cumprod(1 - betas), the one place that arithmetic is spelled, so it stays bit-identical."""
     out, running = [], 1.0
-    for beta in linear_betas(original_steps):
+    for beta in betas:
         running *= 1.0 - beta
         out.append(running)
     return out
+
+
+def alphas_cumprod(original_steps: int = ORIGINAL_STEPS) -> list[float]:
+    return _cumprod_one_minus(linear_betas(original_steps))
 
 
 def timestep_map(num_sampling_steps: int, original_steps: int = ORIGINAL_STEPS) -> list[int]:
@@ -95,11 +101,7 @@ def spaced_alphas_cumprod(tmap, ab) -> list[float]:
     for t in tmap:
         new_betas.append(1.0 - ab[t] / last)
         last = ab[t]
-    out, running = [], 1.0
-    for beta in new_betas:
-        running *= 1.0 - beta
-        out.append(running)
-    return out
+    return _cumprod_one_minus(new_betas)
 
 
 def dit_stages(num_sampling_steps: int, original_steps: int = ORIGINAL_STEPS) -> list[dict]:
@@ -126,22 +128,26 @@ def dit_stages(num_sampling_steps: int, original_steps: int = ORIGINAL_STEPS) ->
 
 def frozen_stages(model: str) -> list[dict]:
     """The stages table of the frozen config: VAR-d20's 10 scales, DiT's 250 steps."""
-    cfg = frozen_config(model)
+    return stages_for_settings(frozen_config(model), str(CONFIGS[model]))[1]
+
+
+def stages_for_settings(settings: dict, where: str = "settings") -> tuple[str, list[dict]]:
+    """(model, baseline stages table) from anything carrying `model`, `build` and `sampler`.
+
+    That is both a run config and a `run.json`, which records the same three keys -- so a driver can
+    plan arms from a config and a check can rebuild a finished run's table, through one dispatch.
+    """
+    model = settings.get("model")
     if model == "var":
-        return var_stages(cfg["build"]["patch_nums"])
-    return dit_stages(cfg["sampler"]["num_sampling_steps"])
+        return model, var_stages(settings["build"]["patch_nums"])
+    if model == "dit":
+        return model, dit_stages(settings["sampler"]["num_sampling_steps"])
+    raise ValueError(f"{where}: model must be 'var' or 'dit', got {model!r}")
 
 
 def stages_for_config(config_path) -> tuple[str, list[dict]]:
-    """(model, baseline stages table) for any run config, so a driver can plan arms without a GPU."""
-    import yaml
-    cfg = yaml.safe_load(Path(config_path).read_text())
-    model = cfg.get("model")
-    if model == "var":
-        return model, var_stages(cfg["build"]["patch_nums"])
-    if model == "dit":
-        return model, dit_stages(cfg["sampler"]["num_sampling_steps"])
-    raise ValueError(f"{config_path}: model must be 'var' or 'dit', got {model!r}")
+    """(model, baseline stages table) for a run config, so a driver can plan arms without a GPU."""
+    return stages_for_settings(yaml.safe_load(Path(config_path).read_text()), str(config_path))
 
 
 def run_record(model: str, stages: list[dict], rows=((207, 0),), **extra) -> dict:

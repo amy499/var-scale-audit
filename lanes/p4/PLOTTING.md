@@ -46,6 +46,7 @@ the four this template adds, so you can hand over your table with no conversion.
 | `p_func` | float [0,1] | **added by P4.** The functional axis — how much is actually committed at this stage (VAR `cum_tokens/total_tokens`, DiT `sqrt(alpha_bar_in)`) |
 | `band` | str | **added by P4.** `early`, `middle` or `late` |
 | `metric` | str | your metric's name, used verbatim |
+| `label` | str | **added by P4**, from your `MetricSpec`: the axis text, defaulting to the name |
 | `value` | float | the number |
 | `direction` | str | **added by P4**, from your `MetricSpec`: `higher_is_better` or `lower_is_better` |
 | `level` | str | **added by P4**, from your `MetricSpec`: `per_image` or `per_set` |
@@ -74,7 +75,8 @@ specs = [
   `higher_is_better`, `lower_is_better`.
 - `level` is `per_image` (several rows per stage, averaged for the figure) or `per_set` (exactly one
   value per stage — more than one is an error, not a silent average).
-- `label=` overrides the axis text; the name is used otherwise.
+- `label=` overrides the axis text; the name is used otherwise. It travels in the tidy table, so it
+  survives a CSV round trip and reaches the figure.
 
 A metric row whose `stage` is empty is a number about the **final image**: it is placed at the last
 stage, so it still lands in `late` rather than being dropped.
