@@ -22,7 +22,7 @@ sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from lanes.p4 import fixtures, progress  # noqa: E402
+from lanes.p4 import bands, fixtures, progress  # noqa: E402
 
 TINY_PATCH_NUMS = [1, 2, 3, 4]    # scripts/phase2/check_seeding.py VAR_BUILD: 4 scales, 30 tokens
 TINY_DIT_STEPS = 20               # scripts/phase2/check_seeding.py DIT tiny sampler
@@ -140,8 +140,6 @@ def check_progress(c: Checks):
 # ---------------------------------------------------------------- U2: frozen bands
 
 def check_bands(c: Checks):
-    from lanes.p4 import bands
-
     c.equal("band names", bands.BANDS, ("early", "middle", "late"))
     c.equal("cuts are thirds of the progress value", bands.CUTS, (1 / 3, 2 / 3))
 
@@ -211,6 +209,267 @@ def check_bands(c: Checks):
     c.equal("var middle band holds 77 of 680 tokens", (var_mid_tokens, var_mapped[-1]["total_tokens"]), (77, 680))
 
 
+# ---------------------------------------------------------------- U3: the shared plot template
+
+def metric_rows(stages, names, rows=((207, 0), (207, 1)), start=1.0):
+    """Synthetic per-image metric rows in the column shape of lanes/p2/SCHEMA.md section 4."""
+    out = []
+    for n, name in enumerate(names):
+        for i, stage in enumerate(r["stage"] for r in stages):
+            for j, (class_id, seed) in enumerate(rows):
+                out.append({"class_id": class_id, "seed": seed, "metric": name,
+                            "value": start + n * 10 + i * 0.5 + j * 0.01, "stage": stage})
+    return out
+
+
+def check_template(c: Checks):
+    from lanes.p4 import plotting
+
+    var_stages = fixtures.frozen_stages("var")
+    var_run = fixtures.run_record("var", var_stages)
+    specs = [plotting.MetricSpec("lpips", direction="lower_is_better"),
+             plotting.MetricSpec("clip_sim", direction="higher_is_better")]
+    tidy = plotting.tidy_from_run(var_run, metric_rows(var_stages, ["lpips", "clip_sim"]), specs,
+                                 arm="baseline", lane="p4")
+
+    c.equal("tidy row count is stages x metrics x images", len(tidy), 10 * 2 * 2)
+    c.that("every tidy row carries both axes and a band",
+           all(set(("p_place", "p_func", "band", "arm", "metric", "value")) <= set(r) for r in tidy))
+    c.that("tidy columns are P2's plus band / p_func / p_place / direction / level",
+           set(plotting.TIDY_COLUMNS) >= {"run_id", "lane", "model", "arm", "class_id", "seed", "stage",
+                                          "metric", "value", "band", "p_place", "p_func",
+                                          "direction", "level"})
+    c.equal("band of si 4 is middle", {r["band"] for r in tidy if r["stage"] == 4}, {"middle"})
+
+    # Metric names, labels and directions come from the input, never from a hardcoded list (R10).
+    spec = plotting.lane_plot_spec(tidy, title="two metrics")
+    c.equal("one panel per input metric", [p["title"] for p in spec["panels"]], ["lpips", "clip_sim"])
+    c.that("panel label carries the metric's own direction",
+           "lower is better" in spec["panels"][0]["y_label"]
+           and "higher is better" in spec["panels"][1]["y_label"],
+           f"{[p['y_label'] for p in spec['panels']]}")
+    invented = plotting.lane_plot_spec(
+        plotting.tidy_from_run(var_run, metric_rows(var_stages, ["p3_semantic_drift_v2"]),
+                              [plotting.MetricSpec("p3_semantic_drift_v2", level="per_image")],
+                              arm="baseline", lane="p3"))
+    c.equal("a metric name the template has never seen is used verbatim",
+            [p["title"] for p in invented["panels"]], ["p3_semantic_drift_v2"])
+
+    # Bands are drawn at their frozen extents, so an empty band does not shift the other two.
+    partial = [r for r in tidy if r["band"] != "middle"]
+    partial_spec = plotting.lane_plot_spec(partial)
+    c.equal("an empty middle band keeps all three band extents",
+            partial_spec["bands"], {"early": (0.0, bands.CUTS[0]), "middle": bands.CUTS,
+                                    "late": (bands.CUTS[1], 1.0)})
+    c.equal("the empty band is labelled as empty, not dropped",
+            partial_spec["band_notes"]["middle"], "no stages")
+    c.that("the two populated bands keep their extents",
+           partial_spec["bands"]["early"] == spec["bands"]["early"]
+           and partial_spec["bands"]["late"] == spec["bands"]["late"])
+
+    # A mismatch between metric rows and the stages table is reported, not silently dropped.
+    c.raises("a metric row naming a stage the run lacks is reported",
+             lambda: plotting.tidy_from_run(var_run, [{"class_id": 207, "seed": 0, "metric": "lpips",
+                                                      "value": 1.0, "stage": 42}],
+                                            [plotting.MetricSpec("lpips")], arm="baseline"),
+             "[42]")
+    c.raises("a non-numeric metric value is reported",
+             lambda: plotting.tidy_from_run(var_run, [{"class_id": 207, "seed": 0, "metric": "lpips",
+                                                      "value": "n/a", "stage": 0}],
+                                            [plotting.MetricSpec("lpips")], arm="baseline"),
+             "not a number")
+    c.raises("no matching metric row is reported",
+             lambda: plotting.tidy_from_run(var_run, metric_rows(var_stages, ["lpips"]),
+                                            [plotting.MetricSpec("fid")], arm="baseline"),
+             "no metric row matched")
+    c.raises("a per_set metric with several rows at one stage is reported",
+             lambda: plotting.aggregate(plotting.tidy_from_run(
+                 var_run, metric_rows(var_stages, ["fid"]),
+                 [plotting.MetricSpec("fid", level="per_set")], arm="baseline")),
+             "per_set")
+    c.raises("an unknown direction is rejected",
+             lambda: plotting.MetricSpec("x", direction="bigger"), "direction")
+    c.raises("an unknown level is rejected", lambda: plotting.MetricSpec("x", level="per_run"), "level")
+
+    # A final-image metric row (empty stage) still lands in a band, at the end of generation.
+    final = plotting.tidy_from_run(var_run, [{"class_id": 207, "seed": 0, "metric": "fid",
+                                             "value": 3.0, "stage": ""}],
+                                  [plotting.MetricSpec("fid", level="per_set")], arm="baseline")
+    c.equal("a final-image metric lands at the last stage", final[0]["stage"], 9)
+    c.equal("a final-image metric lands in late", final[0]["band"], "late")
+
+    # Both models go through the same entry point, and a 250-step axis keeps its ticks readable.
+    dit_stages = fixtures.frozen_stages("dit")
+    dit_tidy = plotting.tidy_from_run(fixtures.run_record("dit", dit_stages),
+                                      metric_rows(dit_stages, ["lpips"], rows=((207, 0),)),
+                                      [plotting.MetricSpec("lpips")], arm="baseline", lane="p4")
+    c.equal("dit tidy covers all 250 stages", len({r["stage"] for r in dit_tidy}), 250)
+    dit_spec = plotting.lane_plot_spec(dit_tidy)
+    c.that("a 250-step axis is thinned to at most 12 ticks",
+           len(dit_spec["panels"][0]["x_ticks"]) <= 12, f"{len(dit_spec['panels'][0]['x_ticks'])} ticks")
+    c.that("dit x ticks are native timesteps", dit_spec["panels"][0]["x_ticks"][0][1] == "999")
+    c.that("var x ticks are native scale indices", spec["panels"][0]["x_ticks"][0][1] == "0")
+
+    # The round trip through CSV keeps the table usable.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = plotting.write_tidy(tidy, Path(tmp) / "tidy.csv")
+        back = plotting.read_tidy(path)
+        c.equal("tidy table survives a CSV round trip", len(back), len(tidy))
+        c.that("round-tripped rows still aggregate",
+               plotting.aggregate(back).keys() == plotting.aggregate(tidy).keys())
+
+        # The render layer: an explicitly named missing backend raises one actionable message.
+        real = plotting.available_backends
+        try:
+            plotting.available_backends = lambda: []
+            c.raises("render with no plotting library names matplotlib",
+                     lambda: plotting.render(spec, Path(tmp) / "x.png", backend="matplotlib"), "matplotlib")
+            c.raises("render with no plotting library names Pillow",
+                     lambda: plotting.render(spec, Path(tmp) / "x.png", backend="pillow"), "Pillow")
+            c.raises("backend='auto' with nothing installed says what to install",
+                     lambda: plotting.render(spec, Path(tmp) / "x.png", backend="auto"), "matplotlib")
+            try:
+                plotting.render(spec, Path(tmp) / "x.png", backend="matplotlib")
+            except plotting.PlotBackendMissing as e:
+                c.that("the message is actionable, not an ImportError traceback",
+                       "not installed" in str(e) and "pip install" in str(e))
+            except Exception as e:   # noqa: BLE001
+                c.that("the missing backend raises PlotBackendMissing", False, f"{type(e).__name__}: {e}")
+            plotting.available_backends = lambda: ["pillow"]
+            c.raises("asking for matplotlib when only Pillow is present names matplotlib",
+                     lambda: plotting.render(spec, Path(tmp) / "x.png", backend="matplotlib"), "matplotlib")
+        finally:
+            plotting.available_backends = real
+        c.raises("an unknown backend is rejected",
+                 lambda: plotting.render(spec, Path(tmp) / "x.png", backend="gnuplot"), "gnuplot")
+
+        # And it actually renders, through every backend this environment has.
+        for backend in plotting.available_backends():
+            out = plotting.lane_plot(tidy, Path(tmp) / f"var_{backend}.png", backend=backend,
+                                     title="VAR d20, two metrics")
+            c.that(f"var lane plot renders via {backend}", out.exists() and out.stat().st_size > 2000,
+                   f"{out} is {out.stat().st_size if out.exists() else 'missing'} bytes")
+            out = plotting.lane_plot(dit_tidy, Path(tmp) / f"dit_{backend}.png", backend=backend)
+            c.that(f"dit lane plot renders via {backend} through the same entry point",
+                   out.exists() and out.stat().st_size > 2000)
+            out = plotting.lane_plot(partial, Path(tmp) / f"empty_band_{backend}.png", backend=backend)
+            c.that(f"an empty band renders via {backend}", out.exists())
+
+
+def check_figure5(c: Checks):
+    from lanes.p4 import figure5, plotting
+
+    def lane(metric, scale, shape, model="var", arm="baseline"):
+        stages = fixtures.frozen_stages(model)
+        rows = [{"class_id": 207, "seed": 0, "metric": metric,
+                 "value": scale * shape(i / (len(stages) - 1)), "stage": st["stage"]}
+                for i, st in enumerate(stages)]
+        return plotting.tidy_from_run(fixtures.run_record(model, stages), rows,
+                                      [plotting.MetricSpec(metric)], arm=arm, lane=metric[:2])
+
+    rising, falling = (lambda t: t), (lambda t: 1 - t)
+    p1 = lane("scale_importance", 1.0, rising)
+    p2 = lane("corruption_recovery", 300.0, falling)
+    p3 = lane("semantic_drift", 0.004, rising)
+    p4 = lane("protect_gain", 12.0, falling, model="dit")
+
+    four = figure5.figure5_spec([("P1 scales", p1), ("P2 corruption", p2),
+                                 ("P3 semantics", p3), ("P4 protect", p4)])
+    c.equal("four lanes give four panels", len(four["panels"]), 4)
+    c.equal("each panel is labelled with its lane",
+            [p["title"] for p in four["panels"]], ["P1 scales", "P2 corruption", "P3 semantics", "P4 protect"])
+    c.that("each panel names its own metric",
+           all(m in p["y_label"] for p, m in zip(four["panels"],
+               ["scale_importance", "corruption_recovery", "semantic_drift", "protect_gain"])),
+           f"{[p['y_label'] for p in four['panels']]}")
+    c.equal("all four share one progress axis", four["bands"], dict(plotting.BAND_EXTENTS))
+    c.that("panels keep their own actual range, stated on the label",
+           [p["value_range"] for p in four["panels"]][1][1] == 300.0
+           and [p["value_range"] for p in four["panels"]][0][1] == 1.0,
+           f"{[p['value_range'] for p in four['panels']]}")
+
+    # Disagreement is preserved: a rising lane stays rising, a falling lane stays falling.
+    rising_pts = [v for _x, v in four["panels"][0]["series"][0]["points"]]
+    falling_pts = [v for _x, v in four["panels"][1]["series"][0]["points"]]
+    c.that("a rising lane stays rising after normalization",
+           all(b >= a for a, b in zip(rising_pts, rising_pts[1:])), f"{rising_pts[:4]}")
+    c.that("a falling lane stays falling after normalization",
+           all(b <= a for a, b in zip(falling_pts, falling_pts[1:])), f"{falling_pts[:4]}")
+    c.that("no lane is averaged or ranked into another",
+           rising_pts != falling_pts and len({len(p["series"]) for p in four["panels"]}) == 1)
+
+    # A lane with a very different value range does not rescale the others.
+    alone = figure5.figure5_spec([("P1 scales", p1)])
+    c.equal("a single lane renders as exactly one panel, with no empty padding", len(alone["panels"]), 1)
+    c.equal("a lane's normalized points do not change when a 300x lane joins it",
+            alone["panels"][0]["series"][0]["points"], four["panels"][0]["series"][0]["points"])
+    c.equal("a lane's stated range does not change either",
+            alone["panels"][0]["value_range"], four["panels"][0]["value_range"])
+
+    # Mixed models: no single committed range is quoted, and the axis label stays honest.
+    c.that("a mixed-model frame does not quote one model's committed range",
+           all(note == "" for note in four["band_notes"].values()), f"{four['band_notes']}")
+    one_model = figure5.figure5_spec([("P1 scales", p1), ("P3 semantics", p3)])
+    c.that("a single-model frame does quote the committed range",
+           one_model["band_notes"]["middle"].startswith("committed"), f"{one_model['band_notes']}")
+    c.that("the native-stage tick label names the model when there is only one",
+           "VAR scale si" in one_model["x_label"] and "native stage" in four["x_label"],
+           f"{one_model['x_label']!r} / {four['x_label']!r}")
+
+    c.raises("no lanes at all is reported", lambda: figure5.figure5_spec([]), "at least one")
+    c.raises("an empty lane table is reported",
+             lambda: figure5.figure5_spec([("P1", [])]), "empty tidy table")
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        for backend in plotting.available_backends():
+            out = figure5.figure5([("P1 scales", p1), ("P2 corruption", p2),
+                                   ("P3 semantics", p3), ("P4 protect", p4)],
+                                  Path(tmp) / f"f5_{backend}.png", backend=backend)
+            c.that(f"four-lane frame renders via {backend}", out.exists() and out.stat().st_size > 3000)
+            out = figure5.figure5([("P1 scales", p1)], Path(tmp) / f"f5_one_{backend}.png", backend=backend)
+            c.that(f"one-lane frame renders via {backend} without collapsing", out.exists())
+
+
+def check_data_layer_is_dependency_free(c: Checks):
+    """Prove the data layer never imports a plotting library, by blocking both and doing the work."""
+    import subprocess
+    script = """
+import sys, importlib.abc, importlib.machinery, tempfile
+BLOCKED = ("matplotlib", "PIL")
+class Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in BLOCKED:
+            raise ImportError(f"blocked for this check: {name}")
+        return None
+sys.meta_path.insert(0, Blocker())
+sys.path.insert(0, %r)
+from lanes.p4 import fixtures, plotting
+stages = fixtures.frozen_stages("var")
+run = fixtures.run_record("var", stages)
+rows = [{"class_id": 207, "seed": 0, "metric": "lpips", "value": 0.1 * i, "stage": s["stage"]}
+        for i, s in enumerate(stages)]
+tidy = plotting.tidy_from_run(run, rows, [plotting.MetricSpec("lpips")], arm="baseline", lane="p4")
+spec = plotting.lane_plot_spec(tidy)
+with tempfile.TemporaryDirectory() as tmp:
+    plotting.write_tidy(tidy, tmp + "/t.csv")
+    assert len(plotting.read_tidy(tmp + "/t.csv")) == len(tidy)
+assert len(spec["panels"]) == 1 and len(spec["bands"]) == 3
+from lanes.p4 import figure5
+f5 = figure5.figure5_spec([("lane A", tidy), ("lane B", tidy)])
+assert len(f5["panels"]) == 2
+leaked = sorted(m for m in sys.modules if m.split(".")[0] in BLOCKED)
+assert not leaked, f"data layer imported {leaked}"
+print("DATA LAYER CLEAN")
+""" % str(REPO)
+    r = subprocess.run([sys.executable, "-c", script], cwd=REPO, capture_output=True, text=True,
+                       env={"PYTHONDONTWRITEBYTECODE": "1", "PATH": "/usr/bin:/bin"})
+    c.that("data layer builds a tidy table with matplotlib and Pillow blocked",
+           r.returncode == 0 and "DATA LAYER CLEAN" in r.stdout,
+           f"exit {r.returncode}: {(r.stderr or r.stdout).strip().splitlines()[-1:] }")
+
+
 # ---------------------------------------------------------------- real run.json, when available
 
 def check_real_runs(c: Checks, root: Path):
@@ -270,7 +529,10 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     print("== P4 shared deliverable self-check (CPU, no plotting library required)")
-    sections = [("U1 progress mapping", check_progress), ("U2 frozen bands", check_bands)]
+    sections = [("U1 progress mapping", check_progress), ("U2 frozen bands", check_bands),
+                ("U3 shared plot template", check_template),
+                ("U4 Figure 5 synthesis frame", check_figure5),
+                ("U3/U4 data layer needs no plotting library", check_data_layer_is_dependency_free)]
     ok = True
     for title, fn in sections:
         c = Checks()
