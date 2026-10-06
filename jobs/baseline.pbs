@@ -1,0 +1,126 @@
+#!/bin/bash
+#PBS -N baseline
+#PBS -P personal-gura0001
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o outputs/baseline/
+#
+# Clean baseline on NSCC ASPIRE 2A: no hooks, both models, batch 16, every row of $MANIFEST.
+# Submit from the repo root:
+#     qsub jobs/baseline.pbs
+#     qsub -v MANIFEST=manifest/other.csv jobs/baseline.pbs
+# 1 GPU brings a fixed 16 CPUs / 110 GB. <=2 h walltime on 'normal' routes to the gdev queue.
+# Results: outputs/baseline/<job id>/summary.txt
+#
+# Default manifest: v1.1, frozen 2026-10-07 (docs/manifest_frozen.md).
+# Exits 1 (after writing the summary) if a model step or a contact sheet failed.
+#   var_d20   configs/var_d20.yaml (strict fp32)       -> outputs/baseline/<job id>/var_d20/
+#   dit       configs/dit_xl2_256.yaml (fp32 + TF32)   -> outputs/baseline/<job id>/dit/
+#   contact   one sheet per model, a row per class with its first 8 images, for the breed check
+#             -> contact_var_d20.png, contact_dit.png
+
+set -uo pipefail
+
+if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "ERROR: submit with 'qsub jobs/baseline.pbs'; never run GPU work on the login node." >&2
+    exit 1
+fi
+cd "$PBS_O_WORKDIR"
+if [[ ! -f runner/generate.py ]]; then
+    echo "ERROR: submit from the repo root (PBS_O_WORKDIR=$PBS_O_WORKDIR)." >&2
+    exit 1
+fi
+
+MANIFEST="${MANIFEST:-manifest/frozen_v1_1.csv}"
+BATCH=16
+VAR_CONFIG=configs/var_d20.yaml
+DIT_CONFIG=configs/dit_xl2_256.yaml
+MODELS=(var_d20 dit)
+declare -A CONFIG=([var_d20]="$VAR_CONFIG" [dit]="$DIT_CONFIG")
+
+JOB="${PBS_JOBID%%.*}"
+OUT="outputs/baseline/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+
+: > "$OUT/steps.tsv"
+step() {   # step NAME CMD...: run, log exit code + duration, keep going
+    local name="$1"; shift
+    echo; echo "===== [$name] $*"
+    local t0=$SECONDS
+    "$@"
+    local rc=$?
+    printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >> "$OUT/steps.tsv"
+    echo "===== [$name] exit=$rc ($((SECONDS - t0))s)"
+    return $rc
+}
+
+echo "job=$PBS_JOBID host=$(hostname) date=$(date -Is)"
+nvidia-smi | tee "$OUT/nvidia-smi.txt"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+
+COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+DIRTY="$(git status --porcelain --untracked-files=no 2>/dev/null | head -c1)"
+MANIFEST_SHA="$(sha256sum "$MANIFEST" | cut -d' ' -f1)"
+ROWS="$(python -c "import sys; from runner.manifest import load_manifest; print(len(load_manifest(sys.argv[1])))" "$MANIFEST")"
+
+for m in "${MODELS[@]}"; do
+    step "$m" python -m runner.generate --config "${CONFIG[$m]}" --manifest "$MANIFEST" \
+        --batch-size $BATCH --out-dir "$OUT/$m"
+done
+
+for m in "${MODELS[@]}"; do
+    if [[ -f "$OUT/$m/run.json" ]]; then
+        step "contact_$m" python scripts/baseline/contact_sheet.py "$OUT/$m" "$OUT/contact_$m.png" \
+            --per-class 8 --title "$m  ${CONFIG[$m]}  $MANIFEST  job $JOB"
+    else
+        echo "no $OUT/$m/run.json; skipping contact_$m"
+    fi
+done
+
+# summary.txt
+step_field() {   # step_field NAME COLUMN (2 = exit code, 3 = seconds)
+    awk -F'\t' -v n="$1" -v c="$2" '$1 == n { v = $c } END { print (v == "" ? "not run" : v) }' "$OUT/steps.tsv"
+}
+FAILED=()   # model steps and contact sheets whose exit code is not 0 (including "not run")
+for m in "${MODELS[@]}"; do
+    for s in "$m" "contact_$m"; do
+        [[ "$(step_field "$s" 2)" == 0 ]] || FAILED+=("$s")
+    done
+done
+{
+    echo "BASELINE (no hooks)  job $PBS_JOBID  $(date -Is)"
+    echo "RESULT: $([[ ${#FAILED[@]} -eq 0 ]] && echo OK || echo "FAILED (${FAILED[*]})")"
+    echo
+    echo "git commit       $COMMIT${DIRTY:+ (tracked files modified)}"
+    echo "manifest         $MANIFEST"
+    echo "manifest sha256  $MANIFEST_SHA"
+    echo "rows             $ROWS"
+    echo "batch size       $BATCH"
+    echo
+    printf '%-8s  %-26s  %-8s  %-8s  %s\n' model config exit seconds run.json
+    for m in "${MODELS[@]}"; do
+        rj="$OUT/$m/run.json"; [[ -f "$rj" ]] || rj="(missing)"
+        printf '%-8s  %-26s  %-8s  %-8s  %s\n' "$m" "${CONFIG[$m]}" \
+            "$(step_field "$m" 2)" "$(step_field "$m" 3)" "$rj"
+    done
+    echo
+    echo "contact sheets (breed check, first 8 images per class):"
+    for m in "${MODELS[@]}"; do
+        f="$OUT/contact_$m.png"
+        echo "  $f  (exit $(step_field "contact_$m" 2))$([[ -f "$f" ]] || echo '  MISSING')"
+    done
+} > "$OUT/summary.txt"
+cat "$OUT/summary.txt"
+echo "Summary: $OUT/summary.txt"
+[[ ${#FAILED[@]} -eq 0 ]] || exit 1
