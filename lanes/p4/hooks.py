@@ -76,7 +76,7 @@ def severity_blend(lam: float):
         if model != "var":
             raise HookConfigError(f"this hook is VAR only; the runner called it for {model!r}. "
                                   "DiT reduces with --skip-timesteps, not a hook "
-                                  "(lanes/p4/comparison_logic.md section 5).")
+                                  "(lanes/p4/comparison_logic.md section 3).")
         if when != "after":
             raise HookConfigError(f"this hook belongs at after(si); the runner called it at {when!r}")
         if state.f_hat_before is None:

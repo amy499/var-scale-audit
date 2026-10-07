@@ -63,7 +63,7 @@ def plan_runs(model: str, band: str, config: Path, manifest: Path, out_root: Pat
         raise ValueError(f"{model} {band} band: the control arm could not be separated from protect or "
                          f"damage at budget(s) {degenerate}. Running it would add a fourth arm that "
                          "tests nothing. Choose another budget, band or control seed "
-                         "(lanes/p4/comparison_logic.md section 5).")
+                         "(lanes/p4/comparison_logic.md section 3).")
     runs = [{"arm": arms.BASELINE, "m": 0, "band": band, "out_dir": str(out_root / arms.BASELINE),
              "record": plans[budgets[0]][arms.BASELINE],
              "cmd": _cmd(config, manifest, out_root / arms.BASELINE), "env": {}}]

@@ -6,7 +6,7 @@ Run from the repo root. Standard library plus PyYAML (through lanes.p4.fixtures)
     python -m lanes.p4.arms --model dit --band middle --budget 25
 
 For a candidate band `B` of size `k` out of `n` native stages, at budget `m`, all three intervened
-arms cut exactly `m` stages and differ only in **where** (lanes/p4/comparison_logic.md section 5):
+arms cut exactly `m` stages and differ only in **where** (lanes/p4/comparison_logic.md section 3):
 
     baseline   nothing                     m = 0
     protect    m stages outside B          spend the cut away from the candidate band
@@ -186,7 +186,7 @@ def arm_plan(model: str, stages, band: str, m: int, *, seed: int = CONTROL_SEED,
     if model == "var" and lam != VAR_GATE_B_LAMBDA:
         raise ArmError(f"Gate B runs every VAR arm at lambda = {VAR_GATE_B_LAMBDA}; got {lam!r}. "
                        "Interior severities belong to the deferred severity sweep "
-                       "(lanes/p4/comparison_logic.md section 5).")
+                       "(lanes/p4/comparison_logic.md section 3).")
 
     ordered, in_band = _band_context(model, stages, band)
     n, k = len(ordered), len(in_band)

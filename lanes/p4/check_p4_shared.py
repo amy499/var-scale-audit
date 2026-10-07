@@ -232,7 +232,7 @@ def check_bands(c: Checks):
                     for b in bands.BANDS}
     c.equal("rejected dit signal split is 134/46/70 steps",
             [len(signal_bands[b]) for b in bands.BANDS], [134, 46, 70])
-    # comparison_logic.md section 4 says every row of that table is recomputed here. The two rows
+    # comparison_logic.md section 2 says every row of that table is recomputed here. The two rows
     # bands.py cannot cut -- noise removed and normalized timestep are neither the placement nor the
     # functional axis -- are cut directly from the stages table so the claim holds for the whole table.
     def thirds(values):

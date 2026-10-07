@@ -9,7 +9,7 @@ One panel per model. The x axis is the **intervened fraction `m / n`**, which is
 axis the two models share: `--skip-timesteps` really removes DiT model evaluations, while the VAR
 intervention runs *after* the transformer pass and therefore saves nothing. Measured wall-clock savings
 are reported for DiT and their absence is stated on the VAR panel rather than left for a reader to
-assume (lanes/p4/comparison_logic.md section 5).
+assume (lanes/p4/comparison_logic.md section 3).
 
 The curve is bounded: damage must fit inside the candidate band, so `m / n` cannot exceed `k / n`
 (0.3 for VAR-d20, 0.332 for the 250-step DiT schedule). This is a bounded contrast, not a general
