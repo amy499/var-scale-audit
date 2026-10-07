@@ -38,6 +38,18 @@ export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
 nvidia-smi
 python scripts/check_third_party.py
 git log -1 --oneline              # run.json records the submodules, not this repo's branch
+# Exit codes are captured rather than ignored: without this the job's status is verify_pairing's
+# alone, so a sweep that lost arms partway could still finish green.
 python -m lanes.p4.pilot run --model var --band "$BAND" --config "$CONFIG" \
     --manifest "$MANIFEST" --out-root "$OUT"
+PILOT_RC=$?
+[[ $PILOT_RC -eq 0 ]] || echo "PILOT INCOMPLETE (exit $PILOT_RC) - verifying what exists, then failing"
 python lanes/p4/verify_pairing.py "$OUT"
+PAIR_RC=$?
+
+if [[ $PILOT_RC -eq 0 && $PAIR_RC -eq 0 ]]; then
+    echo "P4 PILOT COMPLETE AND PAIRED"
+    exit 0
+fi
+echo "P4 PILOT FAILED (pilot exit $PILOT_RC, pairing exit $PAIR_RC) - do not use these runs"
+exit 1

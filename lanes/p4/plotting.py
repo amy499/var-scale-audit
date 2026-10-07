@@ -179,6 +179,10 @@ def tidy_from_tables(tables_dir, metrics, *, run_ids=None) -> list[dict]:
 
     Reads stages.csv, metrics.csv and runs.csv as lanes/p2/SCHEMA.md section 5 defines them, so a lane
     hands over its tables with no conversion. `run_ids` limits the result to those runs.
+
+    A run with no rows for the requested metrics is skipped, because a collected folder normally holds
+    runs the metric was never computed for. A run named in `run_ids` must have rows; having none is an
+    error, not a silent omission.
     """
     tables_dir = Path(tables_dir)
     stages = _read_csv(tables_dir / "stages.csv")
@@ -195,14 +199,28 @@ def tidy_from_tables(tables_dir, metrics, *, run_ids=None) -> list[dict]:
     by_run = {}
     for row in stages:
         by_run.setdefault(row["run_id"], []).append(row)
-    out = []
+    out, empty = [], []
     for run_id in sorted(wanted):
         meta = runs[run_id]
         if run_id not in by_run:
             raise PlotError(f"{run_id}: runs.csv lists it but stages.csv has no stage rows for it")
         record = {"model": meta["model"], "stages": _stage_rows(meta["model"], by_run[run_id], run_id)}
-        out.extend(tidy_from_run(record, [r for r in metric_rows if r["run_id"] == run_id], metrics,
+        rows_here = [r for r in metric_rows if r["run_id"] == run_id]
+        if not any(r.get("metric") in specs for r in rows_here):
+            # A collected folder normally holds runs this figure's metric was never computed for (a
+            # clean baseline, another lane's arm). Skipping them is what makes the documented
+            # tidy_from_tables(dir, specs) call work; naming a run explicitly still demands its rows.
+            empty.append(run_id)
+            continue
+        out.extend(tidy_from_run(record, rows_here, metrics,
                                  arm=meta.get("arm") or run_id, lane=meta.get("lane") or None, run_id=run_id))
+    if not out:
+        raise PlotError(f"no run under {tables_dir} has rows for {sorted(specs)}; "
+                        f"{len(empty)} run(s) were read and none matched")
+    if run_ids:
+        asked_but_empty = sorted(set(run_ids) & set(empty))
+        if asked_but_empty:
+            raise PlotError(f"these runs were named but have no rows for {sorted(specs)}: {asked_but_empty}")
     return out
 
 
@@ -255,13 +273,20 @@ def mean(values):
 
 
 def aggregate(rows: list[dict]) -> dict:
-    """{(metric, arm): [(p_place, stage, value, p_func), ...]} with per_image metrics averaged per stage."""
+    """{(metric, arm): [(p_place, stage, value, p_func), ...]} with per_image metrics averaged per stage.
+
+    The bucket key carries the model and the run, not just (metric, arm, stage). Two runs can share an
+    arm label and still be different experiments -- P4's own pilot has a `protect` run at each budget --
+    and a VAR scale index collides with a DiT step index at 0, 4 and 8. Keying on the label alone would
+    average those into one point with no warning, which is a silently wrong figure rather than a
+    missing one. Rows that genuinely belong to one series still group, because they share a run_id.
+    """
     buckets = {}
     for row in rows:
-        key = (row["metric"], row["arm"], row["stage"])
+        key = (row["metric"], row["arm"], row.get("model"), row.get("run_id"), row["stage"])
         buckets.setdefault(key, []).append(row)
     series = {}
-    for (metric, arm, stage), group in buckets.items():
+    for (metric, arm, _model, _run_id, stage), group in buckets.items():
         level = group[0]["level"]
         if level == "per_set" and len(group) > 1:
             raise PlotError(f"metric {metric!r} is per_set but has {len(group)} rows at stage {stage} "
@@ -269,7 +294,15 @@ def aggregate(rows: list[dict]) -> dict:
         first = group[0]
         series.setdefault((metric, arm), []).append(
             (first["p_place"], stage, mean(r["value"] for r in group), first["p_func"]))
-    for points in series.values():
+    for key, points in series.items():
+        places = [p for p, _s, _v, _f in points]
+        if len(set(places)) != len(places):
+            metric, arm = key
+            raise PlotError(
+                f"metric {metric!r} arm {arm!r} has more than one value at the same progress point. "
+                "Two runs share this arm label -- different budgets, or two models -- so plotting them "
+                "as one series would average them silently. Give each run its own arm label, or pass "
+                "one run's rows at a time.")
         points.sort()
     return series
 

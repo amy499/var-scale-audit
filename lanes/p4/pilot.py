@@ -37,6 +37,7 @@ from lanes.p4 import arms, bands, fixtures  # noqa: E402
 
 DEFAULT_MANIFEST = "manifest/provisional_4x4.csv"
 BATCH_SIZE = 16                      # one batch size per experiment (docs/HANDOVER.md section 3)
+PLAN_FILE = "pilot_plan.json"        # the arms this sweep intended, written before the first run
 FRACTIONS = (0.1, 0.2, 0.3)
 HOOK = "lanes/p4/hooks.py:var_degrade"
 
@@ -58,6 +59,12 @@ def plan_runs(model: str, band: str, config: Path, manifest: Path, out_root: Pat
     budgets = arms.budget_grid(model, stages, band, fractions)
 
     plans = {m: arms.arm_plan(model, stages, band, m, seed=seed) for m in budgets}
+    degenerate = [m for m, plan in plans.items() if plan["control"].get("degenerate")]
+    if degenerate:
+        raise ValueError(f"{model} {band} band: the control arm could not be separated from protect or "
+                         f"damage at budget(s) {degenerate}. Running it would add a fourth arm that "
+                         "tests nothing. Choose another budget, band or control seed "
+                         "(lanes/p4/comparison_logic.md section 5).")
     runs = [{"arm": arms.BASELINE, "m": 0, "band": band, "out_dir": str(out_root / arms.BASELINE),
              "record": plans[budgets[0]][arms.BASELINE],
              "cmd": _cmd(config, manifest, out_root / arms.BASELINE), "env": {}}]
@@ -114,6 +121,16 @@ def run_all(runs: list[dict], out_root: Path, dry_run: bool = False) -> int:
     if not dry_run:
         out_root.mkdir(parents=True, exist_ok=True)
     commit = git_describe()
+    if not dry_run:
+        # Written before the first run so that a sweep killed by walltime, or an arm that failed, is
+        # detectable afterwards: verify_pairing fails any planned arm whose directory has no run.json.
+        # Without this a partial pilot is indistinguishable from a complete one.
+        head = runs[0]["record"]
+        (out_root / PLAN_FILE).write_text(json.dumps(
+            {"model": head["model"], "band": head["band"], "batch_size": BATCH_SIZE,
+             "code_commit": commit, "control_seed": runs[-1]["record"].get("control_seed"),
+             "runs": [{"arm": r["arm"], "m": r["m"], "out_dir": Path(r["out_dir"]).name} for r in runs]},
+            indent=2))
     failures = 0
     for i, r in enumerate(runs, 1):
         out_dir = Path(r["out_dir"])
@@ -127,6 +144,10 @@ def run_all(runs: list[dict], out_root: Path, dry_run: bool = False) -> int:
         if proc.returncode != 0:
             print(f"   FAILED (exit {proc.returncode}) after {seconds}s", flush=True)
             failures += 1
+            if r["arm"] == arms.BASELINE:
+                print("   BASELINE FAILED - no arm can be paired or measured against it; stopping "
+                      "rather than spending the rest of the walltime", flush=True)
+                return failures
             continue
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "pilot.json").write_text(json.dumps(
@@ -134,6 +155,7 @@ def run_all(runs: list[dict], out_root: Path, dry_run: bool = False) -> int:
              "severity_lambda": r["record"]["severity_lambda"], "stages": list(r["record"]["stages"]),
              "windows": list(r["record"]["windows"]), "n_windows": r["record"]["n_windows"],
              "fraction": r["record"]["fraction"], "control_seed": r["record"]["control_seed"],
+             "degenerate": bool(r["record"].get("degenerate")),
              "code_commit": commit, "env": r["env"], "seconds": seconds,
              "cmd": r["cmd"], "baseline_dir": str(Path(runs[0]["out_dir"]))}, indent=2))
         print(f"   done in {seconds}s", flush=True)

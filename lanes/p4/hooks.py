@@ -99,6 +99,10 @@ def trace(model, stage, p, when, state):
     path = os.environ.get(ENV_LOG)
     if not path:
         raise HookConfigError(f"{ENV_LOG} is not set; the trace observer needs an absolute output path")
+    # docs/HANDOVER.md section 4: an observer that writes data uses an absolute path under outputs/p4/.
+    # A relative path would land wherever the job happened to start.
+    if not os.path.isabs(path) or f"{os.sep}outputs{os.sep}p4{os.sep}" not in f"{path}{os.sep}":
+        raise HookConfigError(f"{ENV_LOG}={path!r} must be an absolute path under outputs/p4/")
     latent = state.f_hat if model == "var" else state.x
     record = {"model": model, "stage": stage, "p": p, "when": when, "n_rows": len(state.rows),
               "fields": state.fields, "latent_absmax": float(latent.abs().max())}

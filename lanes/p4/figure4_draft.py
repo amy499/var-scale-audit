@@ -72,6 +72,22 @@ def collect(pilot_root, metric: str) -> dict:
             seconds = progress.load_run(d)["seconds"]["sample"]
             savings.setdefault(fraction, []).append(1.0 - seconds / base_seconds if base_seconds else 0.0)
 
+    # A figure that quietly drops an arm or a budget looks like a finished result, so refuse instead.
+    missing_arms = [a for a in arms.ARMS if a not in points]
+    if missing_arms:
+        raise SystemExit(f"{pilot_root}: no runs found for arm(s) {missing_arms}; Figure 4 reports four "
+                         "arms, so it will not render a partial sweep")
+    budgets = set(seen_m) - {0}
+    per_arm = {}
+    for d in [baseline, *arm_dirs]:
+        info = json.loads((d / "pilot.json").read_text())
+        if info["arm"] != arms.BASELINE:
+            per_arm.setdefault(info["arm"], set()).add(info["m"])
+    uneven = {a: sorted(budgets - ms) for a, ms in per_arm.items() if budgets - ms}
+    if uneven:
+        raise SystemExit(f"{pilot_root}: these arms are missing budgets {uneven}; the arms would not be "
+                         "budget-matched, which is what makes the contrast attributable to placement")
+
     # The baseline is the reference at every budget, so it is drawn flat across the axis.
     base_value = points[arms.BASELINE][0][1]
     widest = max(f for series in points.values() for f, _v in series)

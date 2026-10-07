@@ -141,6 +141,9 @@ def _place(runs: list[tuple[int, int]], lengths: tuple[int, ...],
     Blocks never straddle two runs, because two positions either side of a gap are not consecutive
     steps and would not merge into one transition.
     """
+    if lengths and not runs:
+        raise ArmError(f"cannot place {len(lengths)} window(s) {tuple(lengths)}: this arm has no "
+                       "eligible stages at all")
     remaining = [length for _start, length in runs]
     assigned: list[list[int]] = [[] for _ in runs]
     for w in sorted(lengths, reverse=True):
@@ -217,7 +220,7 @@ def arm_plan(model: str, stages, band: str, m: int, *, seed: int = CONTROL_SEED,
             control, used_seed = candidate, candidate_seed
             break
     if control is None:        # only reachable when the eligible set is too small to separate at all
-        control, degenerate = candidate, True
+        control, used_seed, degenerate = candidate, candidate_seed, True
 
     for name, selected in (("protect", protect), ("control", control)):
         got = window_lengths([position[st] for st in selected])

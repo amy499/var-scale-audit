@@ -21,6 +21,7 @@ Exit code 0 only when every arm passes.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -32,6 +33,7 @@ if str(REPO) not in sys.path:
 
 from lanes.p2.schema import check_pairing, load_run  # noqa: E402
 from lanes.p4.arms import BASELINE  # noqa: E402
+from lanes.p4.pilot import PLAN_FILE  # noqa: E402
 
 
 def _key(row: dict) -> tuple:
@@ -67,7 +69,28 @@ def compare(baseline_dir: Path, arm_dir: Path) -> dict:
     report["reordered"] = reordered
     report["compared"] = True
     report["n_baseline_rows"] = len(baseline["rows"])
+    intervened = bool(arm.get("skip_timesteps")) or any(
+        h.get("kind") == "modify" for h in arm.get("hooks", []))
+    if intervened and report["rows_changed"] == 0:
+        # Paired but identical: the hook or skip list was registered and still changed nothing, so the
+        # arm is not the condition it claims to be. Silently plotting it would show a real-looking
+        # "no effect" result produced by an intervention that never happened.
+        report["ok"] = False
+        report["errors"] = [*report["errors"],
+                            "this arm intervenes but no image differs from the baseline; the "
+                            "intervention did not take effect"]
     return report
+
+
+def planned_arms(root: Path) -> list[str] | None:
+    """The arm directory names lanes/p4/pilot.py intended, or None when no plan was written."""
+    plan = Path(root) / PLAN_FILE
+    if not plan.is_file():
+        return None
+    try:
+        return [r["out_dir"] for r in json.loads(plan.read_text())["runs"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def find_runs(root) -> tuple[Path, list[Path]]:
@@ -99,6 +122,27 @@ def main(argv=None):
 
     print(f"== pairing against {baseline}")
     ok = True
+
+    if not arm_dirs:
+        # Without this, a pilot that produced only its baseline -- or none of its arms -- printed
+        # "ALL ARMS PAIRED" and exited 0, which is the exact silent pass this script exists to prevent.
+        print("   FAIL  no arm directories were found to compare against the baseline")
+        ok = False
+
+    root = args.paths[0] if not args.baseline and len(args.paths) == 1 else baseline.parent
+    planned = planned_arms(root)
+    if planned is not None:
+        present = {d.name for d in arm_dirs} | {baseline.name}
+        missing = [name for name in planned if name not in present]
+        if missing:
+            print(f"   FAIL  the pilot planned {len(planned)} runs; these never produced a run.json: "
+                  f"{missing}")
+            ok = False
+        else:
+            print(f"   ok    all {len(planned)} planned runs are present")
+    else:
+        print(f"   note  no {PLAN_FILE} beside the baseline, so completeness cannot be checked here")
+
     for arm_dir in arm_dirs:
         try:
             r = compare(baseline, arm_dir)

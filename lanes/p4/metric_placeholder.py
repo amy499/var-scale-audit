@@ -58,8 +58,10 @@ def _tensor(path: Path, cache: dict | None):
 def row_metrics(run_dir, baseline_dir, cache: dict | None = None) -> list[dict]:
     """One pair of numbers per image. Rows are matched by (class_id, seed), not by file order.
 
-    `cache` holds already-loaded tensors across calls. Every arm is compared with the same baseline,
-    so without it each arm reloads the baseline's 16 tensors from disk again.
+    `cache` holds the **baseline's** tensors across calls, because every arm is compared with the same
+    baseline and would otherwise reload those 16 files once per arm. An arm's own tensors are read
+    once and are deliberately not cached: keeping them would grow the dict by every image in the
+    sweep for no reuse.
     """
     run_dir, baseline_dir = Path(run_dir), Path(baseline_dir)
     run, base = load_run(run_dir), load_run(baseline_dir)
@@ -72,7 +74,7 @@ def row_metrics(run_dir, baseline_dir, cache: dict | None = None) -> list[dict]:
     rows = []
     for r in run["rows"]:
         b = base_by_key[(r["class_id"], r["seed"])]
-        a_t = _tensor(run_dir / f"{r['file']}.pt", cache)
+        a_t = _tensor(run_dir / f"{r['file']}.pt", None)
         b_t = _tensor(baseline_dir / f"{b['file']}.pt", cache)
         if a_t.shape != b_t.shape:
             raise SchemaError(f"{r['file']}: shapes differ, {tuple(a_t.shape)} vs {tuple(b_t.shape)}")

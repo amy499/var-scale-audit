@@ -43,12 +43,22 @@ class Checks:
     def close(self, name: str, got: float, want: float, tol: float = 5e-4):
         return self.that(name, abs(got - want) <= tol, f"got {got!r}, want {want!r} +/- {tol}")
 
-    def raises(self, name: str, fn, needle: str):
+    def raises(self, name: str, fn, needle: str, exc_type: type = Exception):
+        """Assert fn() raises `exc_type` and that its message mentions `needle`.
+
+        The type matters: without it an assertion passes when the call fails for an unrelated reason
+        whose message happens to contain the needle, which is a check that cannot fail for the thing
+        it was written to catch.
+        """
         try:
             fn()
-        except Exception as e:   # noqa: BLE001 - any exception type, the message is what is asserted
-            return self.that(name, needle in str(e), f"{type(e).__name__}({e}) does not mention {needle!r}")
-        return self.that(name, False, "no exception raised")
+        except exc_type as e:
+            return self.that(name, needle in str(e),
+                             f"{type(e).__name__}({e}) does not mention {needle!r}")
+        except Exception as e:   # noqa: BLE001 - the wrong failure is still a failure
+            return self.that(name, False,
+                             f"raised {type(e).__name__}({e}), expected {exc_type.__name__}")
+        return self.that(name, False, f"no exception raised; expected {exc_type.__name__}")
 
     @property
     def ok(self) -> bool:
@@ -90,6 +100,22 @@ def check_progress(c: Checks):
         c.close(f"dit step {j} placement", dit[j]["p_place"], p_place)
         c.close(f"dit step {j} functional", dit[j]["p_func"], p_func)
 
+    # The respacing rule, against a transcription of upstream's accumulation loop, at step counts
+    # either side of the real and tiny schedules. 250 and 20 agree under either arithmetic, so
+    # checking only those two cannot catch a multiply-instead-of-accumulate shortcut.
+    def upstream_timestep_map(count, total=1000):
+        if count <= 1:
+            return [0]
+        frac, cur, taken = (total - 1) / (count - 1), 0.0, []
+        for _ in range(count):
+            taken.append(round(cur))
+            cur += frac
+        return sorted(set(taken))
+
+    for count in (2, 10, 20, 21, 23, 31, 43, 100, 125, 249, 250, 251, 500, 1000):
+        c.equal(f"timestep_map reproduces upstream accumulation at S={count}",
+                fixtures.timestep_map(count), upstream_timestep_map(count))
+
     # No hardcoded 10-scale or 680-token constant, and a schedule that is not 250 steps, so the
     # mapping holds for VAR d16-d30 and for the tiny CPU models.
     tiny_var = progress.map_stages("var", fixtures.var_stages(TINY_PATCH_NUMS))
@@ -123,18 +149,21 @@ def check_progress(c: Checks):
                    f"{values[:4]} ...")
 
     # A missing field is named, not a KeyError (and the error type is this module's).
+    E = progress.ProgressError
     c.raises("missing var cum_tokens names the field",
-             lambda: progress.map_stages("var", [{"stage": 0, "total_tokens": 30}]), "cum_tokens")
+             lambda: progress.map_stages("var", [{"stage": 0, "total_tokens": 30}]), "cum_tokens", E)
     c.raises("missing dit alpha_bar_in names the field",
-             lambda: progress.map_stages("dit", [{"stage": 999, "p": 0.0}]), "alpha_bar_in")
-    c.raises("missing stage names the field", lambda: progress.map_stages("var", [{"cum_tokens": 1}]), "stage")
-    c.raises("empty stages table is rejected", lambda: progress.map_stages("var", []), "empty")
-    c.raises("unknown model is rejected", lambda: progress.map_stages("vqgan", []), "vqgan")
+             lambda: progress.map_stages("dit", [{"stage": 999, "p": 0.0}]), "alpha_bar_in", E)
+    c.raises("missing stage names the field",
+             lambda: progress.map_stages("var", [{"cum_tokens": 1}]), "'stage'", E)
+    c.raises("empty stages table is rejected", lambda: progress.map_stages("var", []), "empty", E)
+    c.raises("unknown model is rejected", lambda: progress.map_stages("vqgan", []), "vqgan", E)
     c.that("ProgressError is a ValueError", issubclass(progress.ProgressError, ValueError))
 
     # A VAR table that does not cover every scale is rejected rather than silently mis-mapped.
     partial = fixtures.frozen_stages("var")[:5]
-    c.raises("partial var table is rejected", lambda: progress.map_stages("var", partial), "every scale")
+    c.raises("partial var table is rejected",
+             lambda: progress.map_stages("var", partial), "every scale", progress.ProgressError)
 
 
 # ---------------------------------------------------------------- U2: frozen bands
@@ -180,7 +209,7 @@ def check_bands(c: Checks):
     c.equal("p just below the first cut is early", bands.band_of(1 / 3 - 1e-12), "early")
     c.equal("p = 1.0 is late, not outside every band", bands.band_of(1.0), "late")
     c.equal("p = 0.0 is early", bands.band_of(0.0), "early")
-    c.raises("p outside [0, 1] is rejected", lambda: bands.band_of(1.5), "1.5")
+    c.raises("p outside [0, 1] is rejected", lambda: bands.band_of(1.5), "1.5", bands.BandError)
 
     # A tiny model still produces three non-empty bands.
     tiny = bands.assign_bands(progress.map_stages("var", fixtures.var_stages(TINY_PATCH_NUMS)))
@@ -203,6 +232,31 @@ def check_bands(c: Checks):
                     for b in bands.BANDS}
     c.equal("rejected dit signal split is 134/46/70 steps",
             [len(signal_bands[b]) for b in bands.BANDS], [134, 46, 70])
+    # comparison_logic.md section 4 says every row of that table is recomputed here. The two rows
+    # bands.py cannot cut -- noise removed and normalized timestep are neither the placement nor the
+    # functional axis -- are cut directly from the stages table so the claim holds for the whole table.
+    def thirds(values):
+        return [sum(1 for v in values if v < bands.CUTS[0]),
+                sum(1 for v in values if bands.CUTS[0] <= v < bands.CUTS[1]),
+                sum(1 for v in values if v >= bands.CUTS[1])]
+
+    noise_removed = [1.0 - r["sigma_in"] for r in dit_mapped]
+    c.equal("rejected dit noise-removed split is 190/34/26 steps", thirds(noise_removed), [190, 34, 26])
+    noise_bands = [[r["stage"] for r, v in zip(dit_mapped, noise_removed) if lo <= v < hi]
+                   for lo, hi in ((0.0, bands.CUTS[0]), bands.CUTS, (bands.CUTS[1], 1.01))]
+    c.equal("rejected dit noise-removed early band runs t 999..241",
+            (noise_bands[0][0], noise_bands[0][-1]), (999, 241))
+    c.equal("rejected dit noise-removed late band runs t 100..0",
+            (noise_bands[2][0], noise_bands[2][-1]), (100, 0))
+
+    normalized_timestep = [1.0 - r["stage"] / 999 for r in dit_mapped]
+    c.equal("normalized timestep gives the same 83/83/84 split as the step index",
+            thirds(normalized_timestep), [83, 83, 84])
+    c.that("normalized timestep and the step index agree on every stage's band",
+           all(bands.band_of(v) == bands.band_of(r["p_place"])
+               for v, r in zip(normalized_timestep, dit_mapped)),
+           "the two bases disagree somewhere, so they are not interchangeable after all")
+
     mid = next(r for r in dit_mapped if r["step"] == 124)
     c.close("dit index midpoint placement is 0.498", mid["p_place"], 0.498)
     c.close("dit index midpoint 1 - sigma_in is 0.039", 1 - mid["sigma_in"], 0.039)
@@ -321,6 +375,33 @@ def check_template(c: Checks):
     c.that("dit x ticks are native timesteps", dit_spec["panels"][0]["x_ticks"][0][1] == "999")
     c.that("var x ticks are native scale indices", spec["panels"][0]["x_ticks"][0][1] == "0")
 
+    # Two runs can share an arm label (P4's own pilot has a protect run per budget) and a VAR scale
+    # index collides with a DiT step index. Averaging either into one point is a wrong figure, so it
+    # must be refused rather than drawn.
+    budget_a = plotting.tidy_from_run(var_run, metric_rows(var_stages, ["lpips"]),
+                                      [plotting.MetricSpec("lpips")], arm="protect", lane="p4",
+                                      run_id="p4/pilot/protect_m1")
+    budget_b = plotting.tidy_from_run(var_run, metric_rows(var_stages, ["lpips"]),
+                                      [plotting.MetricSpec("lpips")], arm="protect", lane="p4",
+                                      run_id="p4/pilot/protect_m2")
+    c.raises("two budgets sharing an arm label are refused, not averaged",
+             lambda: plotting.aggregate(budget_a + budget_b), "same progress point", plotting.PlotError)
+    var_rows = plotting.tidy_from_run(var_run, metric_rows(var_stages, ["lpips"]),
+                                      [plotting.MetricSpec("lpips")], arm="baseline", lane="p4",
+                                      run_id="var")
+    dit_rows = plotting.tidy_from_run(fixtures.run_record("dit", fixtures.frozen_stages("dit")),
+                                      metric_rows(fixtures.frozen_stages("dit"), ["lpips"],
+                                                  rows=((207, 0),)),
+                                      [plotting.MetricSpec("lpips")], arm="baseline", lane="p4",
+                                      run_id="dit")
+    c.raises("a VAR and a DiT run sharing an arm label are refused, not averaged",
+             lambda: plotting.aggregate(var_rows + dit_rows), "same progress point", plotting.PlotError)
+
+    # The render assertions below only mean something if a backend exists.
+    c.that("at least one plotting backend is available to render with",
+           bool(plotting.available_backends()),
+           "neither matplotlib nor Pillow is importable, so every render assertion below is vacuous")
+
     # The round trip through CSV keeps the table usable.
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -428,9 +509,35 @@ def check_figure5(c: Checks):
            "VAR scale si" in one_model["x_label"] and "native stage" in four["x_label"],
            f"{one_model['x_label']!r} / {four['x_label']!r}")
 
-    c.raises("no lanes at all is reported", lambda: figure5.figure5_spec([]), "at least one")
+    # A lane may hand over several metrics; each must keep its own range and its own direction.
+    mixed_stages = fixtures.frozen_stages("var")
+    mixed = (plotting.tidy_from_run(fixtures.run_record("var", mixed_stages),
+                                    metric_rows(mixed_stages, ["small_metric"], rows=((207, 0),),
+                                                start=0.0),
+                                    [plotting.MetricSpec("small_metric", direction="lower_is_better")],
+                                    arm="a", lane="p9", run_id="p9/small")
+             + plotting.tidy_from_run(fixtures.run_record("var", mixed_stages),
+                                      metric_rows(mixed_stages, ["big_metric"], rows=((207, 0),),
+                                                  start=300.0),
+                                      [plotting.MetricSpec("big_metric", direction="higher_is_better")],
+                                      arm="a", lane="p9", run_id="p9/big"))
+    mixed_spec = figure5.figure5_spec([("P9 two metrics", mixed)])
+    panel = mixed_spec["panels"][0]
+    c.equal("a two-metric lane keeps a range per metric", sorted(panel["metric_ranges"]),
+            ["big_metric", "small_metric"])
+    c.that("the small metric is not squashed by the big one's range",
+           max(v for s_ in panel["series"] if "small_metric" in s_["label"] for _x, v in s_["points"]) > 0.9,
+           "the small metric was normalized against the big metric's range")
+    c.equal("each metric keeps its own direction", panel["metric_directions"],
+            {"small_metric": "lower_is_better", "big_metric": "higher_is_better"})
+    c.that("the panel label states both directions",
+           "lower is better" in panel["y_label"] and "higher is better" in panel["y_label"],
+           panel["y_label"])
+
+    c.raises("no lanes at all is reported", lambda: figure5.figure5_spec([]), "at least one",
+             plotting.PlotError)
     c.raises("an empty lane table is reported",
-             lambda: figure5.figure5_spec([("P1", [])]), "empty tidy table")
+             lambda: figure5.figure5_spec([("P1", [])]), "empty tidy table", plotting.PlotError)
 
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -492,7 +599,7 @@ def check_real_runs(c: Checks, root: Path):
         model = progress.model_of(run)
         mapped = progress.map_run(run)
         label = f"{run_json.parent.name} ({model}, {len(mapped)} stages)"
-        c.that(f"{label}: maps without error", True)
+        c.equal(f"{label}: every recorded stage is mapped", len(mapped), len(run["stages"]))
         if run.get("skip_timesteps"):
             continue   # a skip run's table is checked against its own baseline, not rebuilt here
         c.equal(f"{label}: fixtures reproduce the runner's stages table bit-for-bit",
@@ -548,6 +655,7 @@ def main(argv=None):
             c.that(f"{title} ran to completion", False, f"{type(e).__name__}: {e}")
         c.report(title)
         ok = ok and c.ok
+    skipped = []
     if args.runs:
         c = Checks()
         try:
@@ -557,7 +665,12 @@ def main(argv=None):
             c.that("real-run checks ran to completion", False, f"{type(e).__name__}: {e}")
         c.report(f"real run.json under {args.runs}")
         ok = ok and c.ok
-    print("ALL P4 SHARED CHECKS PASS" if ok else "P4 SHARED CHECKS FAILED")
+    else:
+        skipped.append("real run.json comparison (no --runs)")
+    # The pass line names what did not run, so a green line can never be read as more coverage than
+    # the run actually had.
+    note = f"  (NOT RUN: {'; '.join(skipped)})" if skipped else ""
+    print(("ALL P4 SHARED CHECKS PASS" + note) if ok else "P4 SHARED CHECKS FAILED")
     return 0 if ok else 1
 
 

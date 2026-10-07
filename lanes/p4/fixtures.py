@@ -77,15 +77,27 @@ def alphas_cumprod(original_steps: int = ORIGINAL_STEPS) -> list[float]:
 
 
 def timestep_map(num_sampling_steps: int, original_steps: int = ORIGINAL_STEPS) -> list[int]:
-    """Upstream diffusion/respace.py space_timesteps(original, [count]), increasing (one section)."""
+    """Upstream diffusion/respace.py space_timesteps(original, [count]), increasing (one section).
+
+    Upstream *accumulates* `cur_idx += frac_stride` and rounds the running sum; it does not round
+    `k * frac_stride`. The two disagree for 278 of the 999 step counts (the smallest is 21), because
+    repeated addition and one multiplication round differently in binary floating point. 250 and 20 --
+    the real and tiny schedules -- happen to agree, so the shortcut would have stayed dormant here and
+    produced a wrong schedule for any other step count. Reproduce the accumulation, as
+    `spaced_alphas_cumprod` already does for the same reason.
+    """
     if num_sampling_steps < 1:
         raise ValueError(f"num_sampling_steps must be >= 1, got {num_sampling_steps}")
     if num_sampling_steps > original_steps:
         raise ValueError(f"cannot respace {original_steps} steps up to {num_sampling_steps}")
     if num_sampling_steps == 1:
         return [0]
-    stride = (original_steps - 1) / (num_sampling_steps - 1)
-    return sorted({round(k * stride) for k in range(num_sampling_steps)})
+    frac_stride = (original_steps - 1) / (num_sampling_steps - 1)
+    cur, taken = 0.0, []
+    for _ in range(num_sampling_steps):
+        taken.append(round(cur))
+        cur += frac_stride
+    return sorted(set(taken))
 
 
 def spaced_alphas_cumprod(tmap, ab) -> list[float]:

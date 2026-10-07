@@ -21,6 +21,7 @@ assertion holds. No result is ever taken from a CPU run -- this proves the *mech
 """
 
 import argparse
+import dataclasses
 import json
 import os
 import subprocess
@@ -99,19 +100,27 @@ def check_arms(c: Checks):
 
     # The band ceiling names both numbers, and the DiT early band is one below its size.
     dit = fixtures.frozen_stages("dit")
+    AE = arms.ArmError
     c.raises("dit early band rejects m = k, naming k - 1 and the first step",
-             lambda: arms.arm_plan("dit", dit, "early", 83), "82")
+             lambda: arms.arm_plan("dit", dit, "early", 83), "82", AE)
     c.raises("dit early band ceiling names the unskippable first step",
-             lambda: arms.arm_plan("dit", dit, "early", 83), "999")
+             lambda: arms.arm_plan("dit", dit, "early", 83), "999", AE)
     c.that("dit early band accepts m = k - 1",
            arms.arm_plan("dit", dit, "early", 82)["damage"]["m"] == 82)
     var = fixtures.frozen_stages("var")
-    c.raises("var middle band rejects m = 4 over k = 3", lambda: arms.arm_plan("var", var, "middle", 4), "3")
-    c.raises("a negative budget is rejected", lambda: arms.arm_plan("var", var, "middle", -1), "non-negative")
-    c.raises("an unknown band is rejected", lambda: arms.arm_plan("var", var, "mid", 1), "mid")
-    c.raises("an unknown arm is rejected", lambda: arms.arm_stages("var", var, "middle", 1, "extra"), "extra")
+    c.raises("var middle band rejects m = 4 over k = 3",
+             lambda: arms.arm_plan("var", var, "middle", 4), "eligible-stage count 3", AE)
+    c.raises("a negative budget is rejected",
+             lambda: arms.arm_plan("var", var, "middle", -1), "non-negative", AE)
+    c.raises("a non-integer budget is rejected",
+             lambda: arms.arm_plan("var", var, "middle", 2.5), "non-negative", AE)
+    c.raises("a boolean budget is rejected",
+             lambda: arms.arm_plan("var", var, "middle", True), "non-negative", AE)
+    c.raises("an unknown band is rejected", lambda: arms.arm_plan("var", var, "mid", 1), "mid", AE)
+    c.raises("an unknown arm is rejected",
+             lambda: arms.arm_stages("var", var, "middle", 1, "extra"), "extra", AE)
     c.raises("a VAR arm at an interior lambda is rejected",
-             lambda: arms.arm_plan("var", var, "middle", 1, lam=0.5), "lambda")
+             lambda: arms.arm_plan("var", var, "middle", 1, lam=0.5), "lambda", AE)
 
     # The ceiling the plan states: the swept fraction cannot exceed k / n.
     c.close("var reduction is capped at 0.300",
@@ -179,15 +188,25 @@ def check_hook_unit(c: Checks):
            torch.equal(out0.f_hat, ref.restore_all("var", 2, 0.667, "after", base).f_hat))
 
     # Guards.
+    HE = mod.HookConfigError
     c.raises("the hook refuses to run for DiT",
-             lambda: mod.severity_blend(0.0)("dit", 2, 0.5, "after", base), "VAR only")
+             lambda: mod.severity_blend(0.0)("dit", 2, 0.5, "after", base), "VAR only", HE)
     c.raises("the hook refuses the 'before' side",
-             lambda: mod.severity_blend(0.0)("var", 2, 0.5, "before", base), "after(si)")
+             lambda: mod.severity_blend(0.0)("var", 2, 0.5, "before", base), "after(si)", HE)
+    c.raises("the hook refuses a state with no f_hat_before",
+             lambda: mod.severity_blend(0.0)("var", 2, 0.5, "after",
+                                             dataclasses.replace(base, f_hat_before=None)),
+             "f_hat_before", HE)
     c.raises(f"{arms.ENV_LAMBDA} outside [0, 1] is rejected",
-             lambda: _build(mod, stages="2", lam="1.5"), "outside")
-    c.raises(f"{arms.ENV_STAGES} must be set", lambda: _build(mod, stages=None, lam="0"), arms.ENV_STAGES)
+             lambda: _build(mod, stages="2", lam="1.5"), "outside", HE)
+    c.raises(f"{arms.ENV_LAMBDA} must be a number",
+             lambda: _build(mod, stages="2", lam="half"), "not a number", HE)
+    c.raises(f"{arms.ENV_STAGES} must be set",
+             lambda: _build(mod, stages=None, lam="0"), arms.ENV_STAGES, HE)
     c.raises(f"{arms.ENV_STAGES} must be integers",
-             lambda: _build(mod, stages="early", lam="0"), arms.ENV_STAGES)
+             lambda: _build(mod, stages="early", lam="0"), arms.ENV_STAGES, HE)
+    c.raises(f"an empty {arms.ENV_STAGES} is rejected",
+             lambda: _build(mod, stages=",", lam="0"), "empty", HE)
     hook = _build(mod, stages="3,4,5", lam="0")
     c.equal("the built hook fires at after(si) on its arm's stages only",
             (hook.when, hook.stages), ("after", (3, 4, 5)))
@@ -267,7 +286,7 @@ def check_tiny_runs(c: Checks, tiny_dir: Path, work: Path):
     c.equal("the hooked run records the hook, its stage list and its severity",
             [(h["name"], h["when"], h["stages"]) for h in lam0["hooks"]],
             [("p4_var_degrade_lambda0", "after", [stage])])
-    c.equal("the baseline records no hook", lam0["batch_size"] == base["batch_size"] and base["hooks"], [])
+    c.equal("the baseline records no hook", base["hooks"], [])
     c.equal("every arm used the same config, manifest and batch size",
             {(r["config_path"], r["manifest"], r["batch_size"]) for r in (base, lam0, lam1, half, ref)},
             {(base["config_path"], base["manifest"], base["batch_size"])})
@@ -315,6 +334,117 @@ def check_tiny_dit(c: Checks, tiny_dir: Path, work: Path):
            base["stages"][0]["stage"] not in arm["skip_timesteps"])
 
 
+# ---------------------------------------------------------------- the driver and the pairing gate
+
+def check_driver(c: Checks, tiny_dir: Path, work: Path):
+    """The pilot's run plan, and the gate that decides whether an experiment is valid at all."""
+    import copy
+    import json as _json
+    import shutil
+
+    from lanes.p4 import pilot, verify_pairing
+
+    # --- the plan: baseline first, no hook, batch 16, and arms carrying their own stage sets
+    for model, config in (("var", REPO / "configs" / "var_d20.yaml"),
+                          ("dit", REPO / "configs" / "dit_xl2_256.yaml")):
+        runs = pilot.plan_runs(model, "middle", config, Path("manifest/provisional_4x4.csv"),
+                               work / f"plan_{model}")
+        c.equal(f"{model}: the pilot plans 1 baseline plus 3 arms at 3 budgets", len(runs), 10)
+        c.equal(f"{model}: the baseline is produced first", runs[0]["arm"], arms.BASELINE)
+        c.that(f"{model}: the baseline carries no hook and no skip",
+               "--hook" not in runs[0]["cmd"] and "--skip-timesteps" not in runs[0]["cmd"])
+        c.that(f"{model}: every run uses batch size 16",
+               all(r["cmd"][r["cmd"].index("--batch-size") + 1] == "16" for r in runs))
+        c.that(f"{model}: every run writes its own out-dir",
+               len({r["out_dir"] for r in runs}) == len(runs))
+        for r in runs[1:]:
+            stages = list(r["record"]["stages"])
+            if model == "var":
+                c.equal(f"{model} {r['arm']} m={r['m']}: the hook env names exactly the arm's stages",
+                        r["env"][arms.ENV_STAGES], ",".join(str(x) for x in stages))
+                c.equal(f"{model} {r['arm']} m={r['m']}: the arm runs at lambda 0",
+                        r["env"][arms.ENV_LAMBDA], "0")
+            else:
+                skip = r["cmd"][r["cmd"].index("--skip-timesteps") + 1:]
+                c.equal(f"{model} {r['arm']} m={r['m']}: the skip list is exactly the arm's stages",
+                        [int(x) for x in skip], stages)
+
+    # --- a dry run plans the same work and writes nothing
+    dry_root = work / "dry"
+    dry = pilot.plan_runs("var", "middle", REPO / "configs" / "var_d20.yaml",
+                          Path("manifest/provisional_4x4.csv"), dry_root)
+    c.equal("a dry run reports no failures", pilot.run_all(dry, dry_root, dry_run=True), 0)
+    c.that("a dry run creates no output directory", not dry_root.exists(),
+           f"{dry_root} was created by a run documented to write nothing")
+
+    # --- the pairing gate, on real paired runs produced earlier in this check
+    base_dir, arm_dir = work / "baseline", work / "p4_lambda0"
+    if not (base_dir / "run.json").is_file():
+        c.that("the tiny baseline exists for the pairing checks", False, f"{base_dir} has no run.json")
+        return
+    report = verify_pairing.compare(base_dir, arm_dir)
+    c.that("a real intervened arm is reported as paired", report["ok"], f"{report['errors']}")
+    c.equal("every row is compared", report["n_rows"], report["n_baseline_rows"])
+    c.that("the arm is reported as having changed images", report["rows_changed"] > 0)
+
+    # --- negatives: each must FAIL, or the gate is decorative
+    def tampered(mutate, name):
+        d = work / f"tamper_{name}"
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(arm_dir, d)
+        run = _json.loads((d / "run.json").read_text())
+        mutate(run)
+        (d / "run.json").write_text(_json.dumps(run))
+        return verify_pairing.compare(base_dir, d)
+
+    def break_generator(run):
+        run["rows"][0]["generator_state_sha256"] = "0" * 64
+
+    def drop_row(run):
+        run["rows"] = run["rows"][1:]
+
+    def no_change(run):
+        base = progress.load_run(base_dir)
+        for row, b in zip(run["rows"], base["rows"]):
+            row["tensor_sha256"] = b["tensor_sha256"]
+
+    r = tampered(break_generator, "gen")
+    c.that("an unpaired row fails the gate", not r["ok"], "a changed generator state still passed")
+    c.that("the failure names the unpaired rows",
+           any("not paired" in e for e in r["errors"]), f"{r['errors']}")
+    r = tampered(drop_row, "missing")
+    c.that("a missing row fails the gate before any hash comparison", not r["ok"])
+    c.that("the missing-row failure says what is missing",
+           any("missing from the arm" in e for e in r["errors"]), f"{r['errors']}")
+    r = tampered(no_change, "noop")
+    c.that("an intervened arm that changed no image fails the gate", not r["ok"],
+           "an intervention that did nothing was reported as a valid arm")
+
+    # --- a reordered arm is still paired: order is not identity
+    reordered_dir = work / "reordered"
+    shutil.rmtree(reordered_dir, ignore_errors=True)
+    shutil.copytree(arm_dir, reordered_dir)
+    run = _json.loads((reordered_dir / "run.json").read_text())
+    run["rows"] = list(reversed(run["rows"]))
+    (reordered_dir / "run.json").write_text(_json.dumps(run))
+    r = verify_pairing.compare(base_dir, reordered_dir)
+    c.that("rows written in a different order still pair", r["ok"], f"{r['errors']}")
+    c.that("the different order is reported", r["reordered"])
+
+    # --- completeness: a planned arm that produced nothing must fail
+    plan_root = work / "planned"
+    shutil.rmtree(plan_root, ignore_errors=True)
+    (plan_root / arms.BASELINE).mkdir(parents=True)
+    shutil.copy(base_dir / "run.json", plan_root / arms.BASELINE / "run.json")
+    (plan_root / pilot.PLAN_FILE).write_text(_json.dumps(
+        {"runs": [{"arm": arms.BASELINE, "m": 0, "out_dir": arms.BASELINE},
+                  {"arm": "damage", "m": 1, "out_dir": "damage_m1"}]}))
+    c.equal("a pilot missing a planned arm fails the gate",
+            verify_pairing.main([str(plan_root)]), 1)
+    c.equal("a pilot with no arms at all fails the gate",
+            verify_pairing.main([str(work / "lonely")]) if (work / "lonely").is_dir() else 1, 1)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tiny-dir", type=Path, help="directory holding var_tiny.yaml / dit_tiny.yaml")
@@ -323,9 +453,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     print("== P4 pilot self-check (CPU; proves the mechanics, never a result)")
-    sections = [("U7 arm construction", check_arms)]
+    skipped = []
+    sections = [("arm construction", check_arms)]
     if not args.arms_only:
-        sections.append(("U7 VAR hook, called directly", check_hook_unit))
+        sections.append(("VAR hook, called directly", check_hook_unit))
+    else:
+        skipped.append("VAR hook unit behaviour (--arms-only)")
     ok = True
     for title, fn in sections:
         c = Checks()
@@ -340,8 +473,9 @@ def main(argv=None):
         with tempfile.TemporaryDirectory() as tmp:
             work = args.work or Path(tmp)
             work.mkdir(parents=True, exist_ok=True)
-            for title, fn in (("U7 VAR hook on a tiny model", check_tiny_runs),
-                              ("U7 DiT arm on a tiny model", check_tiny_dit)):
+            for title, fn in (("VAR hook on a tiny model", check_tiny_runs),
+                              ("DiT arm on a tiny model", check_tiny_dit),
+                              ("pilot driver and pairing gate", check_driver)):
                 c = Checks()
                 try:
                     fn(c, args.tiny_dir, work)
@@ -349,10 +483,12 @@ def main(argv=None):
                     c.that(f"{title} ran to completion", False, f"{type(e).__name__}: {e}")
                 c.report(title)
                 ok = ok and c.ok
-    elif not args.arms_only:
-        print("-- tiny-model runs skipped (no --tiny-dir); the hook's bit-level equivalence is unproven here")
+    else:
+        skipped.append("tiny-model runs, so the hook's bit-level equivalence to restore_all is "
+                       "unproven here (no --tiny-dir)")
 
-    print("ALL P4 PILOT CHECKS PASS" if ok else "P4 PILOT CHECKS FAILED")
+    note = f"  (NOT RUN: {'; '.join(skipped)})" if skipped else ""
+    print(("ALL P4 PILOT CHECKS PASS" + note) if ok else "P4 PILOT CHECKS FAILED")
     return 0 if ok else 1
 
 

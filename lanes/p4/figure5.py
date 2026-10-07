@@ -49,22 +49,31 @@ def figure5_spec(lane_tables, *, title: str = "Figure 5: stage importance across
         models.update(r["model"] for r in rows)
         series = plotting.aggregate(rows)
         metrics = list(dict.fromkeys(r["metric"] for r in rows))
-        values = [v for points in series.values() for _p, _s, v, _f in points]
-        lo, hi = min(values), max(values)
+        # Each metric is normalized against its own range and labelled with its own direction. Pooling
+        # them would squash a 0-1 metric against a 0-300 one in the same panel and print one arrow for
+        # both, so a lane handing over two metrics would get a panel that misreads them.
+        ranges, directions = {}, {}
+        for metric in metrics:
+            vals = [r["value"] for r in rows if r["metric"] == metric]
+            ranges[metric] = (min(vals), max(vals))
+            directions[metric] = next(r["direction"] for r in rows if r["metric"] == metric)
+        lo = min(r[0] for r in ranges.values())
+        hi = max(r[1] for r in ranges.values())
 
         panel_series, ticks = [], set()
         for (metric, arm), points in sorted(series.items()):
             xs = [(p, v) for p, _s, v, _f in points]
             panel_series.append({"label": arm if len(metrics) == 1 else f"{metric} / {arm}",
-                                 "kind": kind, "points": _normalize(xs, lo, hi)})
+                                 "kind": kind, "points": _normalize(xs, *ranges[metric])})
             ticks.update((p, str(s)) for p, s, _v, _f in points)
-        arrow = plotting.direction_phrase(rows[0]["direction"])
+        described = "; ".join(f"{m} {ranges[m][0]:.3g}-{ranges[m][1]:.3g}, "
+                              f"{plotting.direction_phrase(directions[m])}" for m in metrics)
         panels.append({"title": label,
-                       "y_label": f"{', '.join(metrics)} normalized in-panel "
-                                  f"(actual {lo:.3g}-{hi:.3g}, {arrow})",
+                       "y_label": f"normalized in-panel (actual {described})",
                        "series": panel_series,
                        "x_ticks": plotting.thin_ticks(sorted(ticks), limit=8),
-                       "value_range": (lo, hi), "metrics": metrics})
+                       "value_range": (lo, hi), "metrics": metrics,
+                       "metric_ranges": dict(ranges), "metric_directions": dict(directions)})
 
     notes = plotting.band_annotation([r for _l, rows in lane_tables for r in rows]) if len(models) == 1 \
         else {band: "" for band in bands.BANDS}
