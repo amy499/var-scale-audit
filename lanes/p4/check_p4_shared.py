@@ -618,6 +618,8 @@ def check_skip_pairing(c: Checks, root: Path):
         else:
             baselines[run["sampler"]["num_sampling_steps"]] = progress.map_run(run)
     if not pairs:
+        c.that("a --skip-timesteps run was available to check placement stability against", False,
+               "no DiT skip run under --runs, so the kept-timestep invariant was not exercised")
         return
     for run_json, run in pairs:
         steps = run["sampler"]["num_sampling_steps"]

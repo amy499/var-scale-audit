@@ -38,7 +38,6 @@ from lanes.p4 import arms, bands, fixtures  # noqa: E402
 DEFAULT_MANIFEST = "manifest/provisional_4x4.csv"
 BATCH_SIZE = 16                      # one batch size per experiment (docs/HANDOVER.md section 3)
 PLAN_FILE = "pilot_plan.json"        # the arms this sweep intended, written before the first run
-FRACTIONS = (0.1, 0.2, 0.3)
 HOOK = "lanes/p4/hooks.py:var_degrade"
 
 
@@ -51,7 +50,7 @@ def git_describe() -> str:
 
 
 def plan_runs(model: str, band: str, config: Path, manifest: Path, out_root: Path,
-              fractions=FRACTIONS, seed: int = arms.CONTROL_SEED) -> list[dict]:
+              fractions=arms.FRACTIONS, seed: int = arms.CONTROL_SEED) -> list[dict]:
     """Every run of one model's pilot, baseline first. Each entry carries its arm record and command."""
     cfg_model, stages = fixtures.stages_for_config(config)
     if cfg_model != model:
@@ -174,7 +173,7 @@ def main(argv=None):
     ap.add_argument("--manifest", type=Path, default=Path(DEFAULT_MANIFEST))
     ap.add_argument("--out-root", type=Path, help="default: outputs/p4/pilot/<model>")
     ap.add_argument("--seed", type=int, default=arms.CONTROL_SEED)
-    ap.add_argument("--fractions", type=float, nargs="+", default=list(FRACTIONS))
+    ap.add_argument("--fractions", type=float, nargs="+", default=list(arms.FRACTIONS))
     ap.add_argument("--dry-run", action="store_true", help="with 'run': print the commands only")
     args = ap.parse_args(argv)
 

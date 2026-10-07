@@ -52,6 +52,7 @@ CONTROL_SEED = 20261006        # fixed, recorded, and reported with every contro
 ENV_STAGES, ENV_LAMBDA, ENV_LOG = "P4_STAGES", "P4_LAMBDA", "P4_LOG"
 ARM_ENV = (ENV_STAGES, ENV_LAMBDA, ENV_LOG)
 REDRAW_ATTEMPTS = 64           # successive seeds tried before a control arm is called degenerate
+FRACTIONS = (0.1, 0.2, 0.3)    # the swept reduction budgets, as a fraction of all native stages
 
 
 class ArmError(ValueError):
@@ -254,7 +255,7 @@ def arm_stages(model: str, stages, band: str, m: int, arm: str, **kw) -> dict:
     return arm_plan(model, stages, band, m, **kw)[arm]
 
 
-def budget_grid(model: str, stages, band: str, fractions=(0.1, 0.2, 0.3)) -> list[int]:
+def budget_grid(model: str, stages, band: str, fractions=FRACTIONS) -> list[int]:
     """The budgets a fraction sweep asks for, rounded to whole stages and capped at the band."""
     ordered, in_band = _band_context(model, stages, band)
     ceiling = len(eligible(model, ordered, inside=in_band))

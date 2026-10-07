@@ -131,6 +131,13 @@ keeps the intended contrast and is what makes a quality–compute curve possible
 plan's own authority rule, that departure is P1's call, not P4's — it is listed in §8 as a question for
 P1, to be answered before any GPU time is spent on the protect arms.**
 
+**One placement asymmetry to report with the result.** Protect spends its cut in the largest
+contiguous run of eligible stages, so for VAR's middle band at small `m` the protect cut lands entirely
+in late (`si` 6-9) and never in early. The contrast is then protect-in-late against damage-in-middle,
+not protect-spread against damage-in-middle. The control arm is what separates "this band is special"
+from "late is special", which is part of why it is a required fourth arm rather than a nicety. State
+this beside any VAR middle-band result.
+
 ### The operations, per model
 
 | Model | Operation | Why this one |
