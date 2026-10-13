@@ -5,7 +5,7 @@ Owner: P4. Two halves, and the split matters:
 | Half | Where | Status |
 |---|---|---|
 | Progress mapping, bands, plot template, Figure 5 frame, arm construction, the VAR hook | **Your laptop, CPU** | Built and verified |
-| The Gate B pilot itself (real VAR-d20 and DiT-XL/2 images) | **NSCC GPU only** | Jobs written, **not yet submitted** |
+| The Gate B pilot itself (real VAR-d20 and DiT-XL/2 images) | **NSCC GPU** (PBS, §B) or **TC2 GPU** (SLURM, §B′) | Jobs written, **not yet submitted** |
 
 **No result ever comes from a CPU run.** The CPU checks prove the mechanics — that the hook removes
 exactly what it claims, that every arm stays paired, that the bands are what the document says. The
@@ -189,13 +189,214 @@ no change to the figure code.
 
 ---
 
+## B′. CCDS GPU Cluster TC2 (SLURM) — alternative to NSCC
+
+TC2 is an NTU CCDS GPU cluster (NVIDIA A40s) using **SLURM** instead of PBS. The workflow is the same
+as section B but with different SSH, modules, job commands, and resource limits. Use this section
+**instead of** section B when running on TC2.
+
+### TC2 quick reference
+
+| Item | Value |
+|---|---|
+| Head node | `10.96.189.12`, port 22 (NTU network or VPN only) |
+| Scheduler | SLURM (`sbatch` / `squeue` / `scancel`) |
+| Partition | `MGPU-TC2` |
+| QoS | `normal` |
+| GPUs | NVIDIA A40 (4–8 per node) |
+| Max concurrent jobs | 2 per user |
+| Max walltime | 6 hours |
+| Max resources per user | 10 CPUs, 1 GPU, 30 GB RAM |
+| Home directory | `/home/msai/<username>` |
+| Disk quota | 100 GB |
+| Conda | `module load anaconda` (system-wide Anaconda) |
+| No `/scratch` | Everything lives in your home; manage disk carefully |
+
+### B′1. Log in
+
+TC2 is accessible only on the NTU network (or via NTU VPN).
+
+```bash
+ssh <username>@10.96.189.12              # NTU network account ID, lowercase
+```
+
+Optional `~/.ssh/config` entry:
+
+```
+Host tc2
+    HostName 10.96.189.12
+    User <username>
+```
+
+Then `ssh tc2` is enough (VPN still required from off campus).
+
+On first login your home directory is created. Check your quota and QoS:
+
+```bash
+mytcinfo                                 # home dir, QoS, resource limits
+ncdu                                     # interactive disk usage viewer
+```
+
+### B′2. Clone the repo and set up the environment (once)
+
+```bash
+cd ~
+git clone --recurse-submodules https://github.com/amy499/var-scale-audit.git
+cd ~/var-scale-audit
+python scripts/check_third_party.py      # expect two [ OK ] lines
+```
+
+Set up conda (first time only):
+
+```bash
+module load anaconda
+conda init bash && source ~/.bashrc
+conda env create -f environment.yml      # creates var-dit env
+conda activate var-dit
+```
+
+Auto-load in every session — add to `~/.bashrc`:
+
+```bash
+module load anaconda
+conda activate var-dit
+```
+
+Download checkpoints:
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+python scripts/download_checkpoints.py   # ~5.9 GB; checks hashes
+python scripts/check_third_party.py      # re-check after download
+```
+
+TC2 has no `/scratch`. Everything lives in your home directory. The 100 GB quota must hold the
+conda env (~6–10 GB), checkpoints (~5.9 GB), and outputs. Run `ncdu` regularly and pull outputs to
+your laptop as they complete.
+
+### B′3. Every new session
+
+```bash
+cd ~/var-scale-audit
+module load anaconda
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+```
+
+### B′4. Smoke test first (Gate A)
+
+```bash
+mkdir -p outputs/p4/slurm
+sbatch lanes/p4/jobs/smoke_tc2.sh
+squeue -u $USER                          # PD = pending, R = running, gone = finished
+```
+
+Once finished, check:
+
+```bash
+cat outputs/p4/smoke/<JOBID>/job.log     # look for two MATCH PASS lines
+```
+
+The SLURM stdout/stderr go to `outputs/p4/slurm/output_p4_smoke_<JOBID>.out` and
+`error_p4_smoke_<JOBID>.err`. The application log is `outputs/p4/smoke/<JOBID>/job.log`.
+
+**A `MISMATCH` is never worked around.** Send P1 the output folder listing and `job.log`.
+
+Do not run the pilot until the smoke test passes.
+
+### B′5. The Gate B pilot
+
+```bash
+sbatch lanes/p4/jobs/pilot_var_tc2.sh    # ~20 min of a 45 min walltime
+sbatch lanes/p4/jobs/pilot_dit_tc2.sh    # ~25 min of a 2 h walltime
+squeue -u $USER                          # check both
+```
+
+TC2 allows at most **2 concurrent jobs** per user, so both can run at once. Watch for the last
+line of `job.log`:
+
+```
+P4 PILOT COMPLETE AND PAIRED
+```
+
+Anything else means do not use those runs.
+
+### B′6. Numbers and the figure
+
+Same as section B4, using the TC2 output paths:
+
+```bash
+python lanes/p4/verify_pairing.py outputs/p4/pilot_var/<JOBID>
+python -m lanes.p4.metric_placeholder --pilot outputs/p4/pilot_var/<JOBID>
+python -m lanes.p4.metric_placeholder --pilot outputs/p4/pilot_dit/<JOBID>
+python -m lanes.p4.figure4_draft outputs/p4/pilot_var/<JOBID> outputs/p4/pilot_dit/<JOBID> \
+    --out outputs/p4/figure4_draft.png
+git log -1 --oneline
+```
+
+### B′7. Monitoring and troubleshooting (TC2 / SLURM)
+
+| Action | Command |
+|---|---|
+| Check job queue | `squeue -u $USER` or `squeue -la` |
+| Job details | `scontrol show jobid <JOBID>` |
+| Cancel a job | `scancel <JOBID>` |
+| Job history | `sacct -u $USER` or `myjobhistory` |
+| Completed job efficiency | `seff <JOBID>` |
+| Node status | `sinfo -N -l` |
+| GPU assigned to running job | `scontrol -d show jobid <JOBID>` (look for `JOB_GRES`) |
+
+Common SLURM failure reasons (visible via `squeue -la`):
+
+| Reason | What to do |
+|---|---|
+| `QOSMaxJobsPerUserLimit` | 2 jobs max. Wait for one to finish. |
+| `QOSMaxCpuPerUserLimit` / `QOSMaxMemoryPerUser` / `QOSMaxGRESPerUser` | Total resources across all running jobs exceed QoS. Reduce or run one job at a time. |
+| `Priority` / `Resources` | Normal queuing. Defer submission if many jobs are pending. |
+
+### B′8. Copying results to your laptop
+
+From your laptop (NTU VPN connected):
+
+```bash
+scp '<username>@10.96.189.12:~/var-scale-audit/outputs/p4/…/*.png' .
+scp 'tc2:~/var-scale-audit/outputs/p4/…/*.png' .    # with the ~/.ssh/config from B′1
+```
+
+Or use FileZilla (SFTP, host `10.96.189.12`, port 22).
+
+### PBS ↔ SLURM cheat sheet (for P4 jobs)
+
+| PBS (NSCC) | SLURM (TC2) |
+|---|---|
+| `qsub -P <project> job.pbs` | `sbatch job.sh` |
+| `qstat -u $USER` | `squeue -u $USER` |
+| `qstat -f <JOBID>` | `scontrol show jobid <JOBID>` |
+| `qdel <JOBID>` | `scancel <JOBID>` |
+| `#PBS -N name` | `#SBATCH --job-name=name` |
+| `#PBS -q normal` | `#SBATCH --qos=normal` |
+| `#PBS -l select=1:ngpus=1` | `#SBATCH --nodes=1` + `#SBATCH --gres=gpu:1` |
+| `#PBS -l walltime=HH:MM:SS` | `#SBATCH --time=HH:MM:SS` |
+| `#PBS -j oe` | `#SBATCH --output=…` + `#SBATCH --error=…` |
+| `$PBS_JOBID` | `$SLURM_JOB_ID` |
+| `$PBS_O_WORKDIR` | `$SLURM_SUBMIT_DIR` |
+| `module load miniforge3` | `module load anaconda` |
+
+---
+
 ## C. If something fails
 
 | Symptom | What it means |
 |---|---|
-| `checkpoint not downloaded: ...` | Run `scripts/nscc/setup_login.sh`, or `scripts/download_checkpoints.py` |
+| `checkpoint not downloaded: ...` | Run `scripts/nscc/setup_login.sh` (NSCC) or `python scripts/download_checkpoints.py` (TC2) |
 | `MISMATCH` in the smoke log | Stop. Send P1 the folder listing and `job.log`. Never work around it. |
 | `PAIRING FAILED` | The comparison is invalid. Re-run it; never adjust anything to make it pass. |
 | `P4 PILOT FAILED` | At least one run failed or an arm is missing. The log names which. |
 | `no plotting library is installed` | Neither matplotlib nor Pillow is importable. Pillow is in both env files; check the env is active. |
 | Check script fails after a `runner/` change | Expected if P1 changed the runner. Re-run both check scripts and tell P4 what broke. |
+| `EnvironmentNameNotFound: var-dit` (TC2) | Conda env not created. Run `conda env create -f environment.yml` after `module load anaconda`. |
+| `CommandNotFoundError` on `conda activate` (TC2) | Initialize conda first: `conda init bash`, then `source ~/.bashrc`, then `eval "$(conda shell.bash hook)"`. |
+| Job stuck in PD with `QOSMaxJobsPerUserLimit` (TC2) | Already have 2 jobs running. Wait or `scancel` one. |
+| No output folder created (TC2) | Job didn't start in the repo root. Check `outputs/p4/slurm/error_*.err` for details. |
+| Disk quota exceeded (TC2) | TC2 home is 100 GB with no `/scratch`. Run `ncdu`, remove old outputs, pull results to laptop. |

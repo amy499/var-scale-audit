@@ -18,3 +18,7 @@ dist/
 .omc/
 .idea/
 .vscode/
+
+# Local agent instructions (not shared with the team)
+*/CLAUDE.md
+*/AGENTS.md
