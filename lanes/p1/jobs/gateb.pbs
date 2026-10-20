@@ -1,0 +1,321 @@
+#!/bin/bash
+#PBS -N p1_gateb
+#PBS -P personal-gura0001
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o outputs/p1/pbs/
+# P1 stage removal (lanes/p1/README.md): per model, a clean baseline, then one run per removal arm, each
+# recorded with lanes/p2/schema.py (--lane p1), scored (pixel distance; classifier + Inception features
+# with QUALITY=1) and merged into outputs/p1/<JOBID>/tables/. Summary: outputs/p1/<JOBID>/summary.txt.
+# Submit from the repo root (mkdir -p outputs/p1/pbs first):
+#     qsub -v SETTINGS=lanes/p1/jobs/gateb_var.env lanes/p1/jobs/gateb.pbs
+#     qsub -v SETTINGS=lanes/p1/jobs/gateb_dit.env lanes/p1/jobs/gateb.pbs
+# SETTINGS names a file of the variables below (lanes/p1/jobs/*.env); it is read first, so it wins.
+# Arms:  VAR_ARMS="NAME:S,S,S ..."  VAR scales removed (variant b, lanes/p1/hooks.py:remove_scales)
+#        DIT_ARMS="NAME:A-B ..."    DiT step indices A..B (0 = first of 250) skipped with burn; converted to
+#                                   timesteps through this job's DiT baseline run.json stages table
+# Every run uses the same config, manifest and batch size (16) as its baseline. Exits 1 (after writing the
+# summary) if any step failed, a pairing check failed, or a baseline differs from BASELINE_REF.
+set -uo pipefail
+[[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
+cd "$PBS_O_WORKDIR"
+[[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
+if [[ -n "${SETTINGS:-}" ]]; then
+    source "$SETTINGS" || { echo "cannot read SETTINGS=$SETTINGS" >&2; exit 1; }
+fi
+
+VAR_CONFIG="${VAR_CONFIG:-configs/var_d20.yaml}"
+DIT_CONFIG="${DIT_CONFIG:-configs/dit_xl2_256.yaml}"
+MANIFEST="${MANIFEST:-manifest/frozen_v1_1.csv}"
+VAR_ARMS="${VAR_ARMS:-remove_mid:3,4,5}"
+DIT_ARMS="${DIT_ARMS:-remove_mid:84-166}"
+VAR_CUT="${VAR_CUT:-3}"                                 # scales per VAR arm (equal-cuts rule)
+DIT_CUT="${DIT_CUT:-83}"                                # steps per DiT arm (equal-cuts rule)
+RUN_VAR="${RUN_VAR:-1}"
+RUN_DIT="${RUN_DIT:-1}"
+QUALITY="${QUALITY:-1}"                                 # 1: classifier + Inception features (lanes/p2/quality.py)
+P3_RIDEALONG="${P3_RIDEALONG:-0}"                       # 1: P3's observe hook on the VAR baseline (never DiT)
+BASELINE_REF="${BASELINE_REF:-outputs/baseline/25665469}"   # jobs/baseline.pbs output the baselines must match
+EXP_TAG="${EXP_TAG:-gateb}"
+BATCH=16
+declare -A REF_DIR=([var]=var_d20 [dit]=dit)             # model -> subdirectory of BASELINE_REF
+JOB="${PBS_JOBID%%.*}"
+OUT="${OUT_ROOT:-outputs/p1}/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+FAILED=0
+ARMS=()   # model/arm, in run order, for the summary
+
+: > "$OUT/steps.tsv"
+step() {   # step NAME CMD...: run, log exit code + duration
+    local name="$1"; shift
+    echo; echo "===== [$name] $*"
+    local t0=$SECONDS
+    "$@"
+    local rc=$?
+    printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >> "$OUT/steps.tsv"
+    echo "===== [$name] exit=$rc ($((SECONDS - t0))s)"
+    return $rc
+}
+step_field() {   # step_field NAME COLUMN (2 = exit code, 3 = seconds)
+    awk -F'\t' -v n="$1" -v c="$2" '$1 == n { v = $c } END { print (v == "" ? "-" : v) }' "$OUT/steps.tsv"
+}
+
+echo "job=$PBS_JOBID host=$(hostname) date=$(date -Is)"
+nvidia-smi > "$OUT/nvidia-smi.txt" 2>&1
+[[ -f "$MANIFEST" ]] || { echo "FAILED: manifest not found: $MANIFEST" >&2; exit 1; }
+COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+DIRTY="$(git status --porcelain --untracked-files=no 2>/dev/null | head -c1)"
+MANIFEST_SHA="$(sha256sum "$MANIFEST" | cut -d' ' -f1)"
+ROWS="$(python -c "import sys; from runner.manifest import load_manifest; print(len(load_manifest(sys.argv[1])))" "$MANIFEST")"
+echo "settings: ${SETTINGS:-<none>}  manifest: $MANIFEST (${MANIFEST_SHA:0:12}, $ROWS rows)"
+echo "VAR arms: [$VAR_ARMS]  DiT arms: [$DIT_ARMS]  quality: $QUALITY  P3 ride-along: $P3_RIDEALONG  reference: $BASELINE_REF"
+if [[ "$QUALITY" == 1 ]]; then   # quality.py never downloads unless asked; say so once, up front
+    WEIGHTS="$(python -c "from pathlib import Path; from lanes.p2.quality import WEIGHTS_DIR, WEIGHTS_URL; print(WEIGHTS_DIR / Path(WEIGHTS_URL).name)")"
+    [[ -f "$WEIGHTS" ]] || echo "WARNING: classifier weights missing ($WEIGHTS): every quality step will fail." \
+        "Run 'python -m lanes.p2.quality --download' on the login node; this job does not download."
+fi
+
+# DiT step indices A..B -> original timesteps, from a clean baseline's run.json stages table.
+read -r -d '' TO_TIMESTEPS <<'EOF'
+import json, sys
+path, a, b, cut = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+run = json.load(open(path))
+if run.get("skip_timesteps"):
+    sys.exit(f"ERROR: {path} is not a clean baseline (skip_timesteps {run['skip_timesteps']})")
+stages = run["stages"]
+by_step = {s["step"]: s["timestep_in"] for s in stages}
+table = {s["stage"] for s in stages}
+steps = list(range(a, b + 1))
+missing = [i for i in steps if i not in by_step]
+if missing:
+    sys.exit(f"ERROR: step indices {missing[:5]} are not in the stages table of {path} (steps {min(by_step)}..{max(by_step)})")
+ts = [by_step[i] for i in steps]
+absent = [t for t in ts if t not in table]
+if absent:
+    sys.exit(f"ERROR: converted timesteps {absent[:5]} are not in the stages table of {path}")
+if len(set(ts)) != cut:
+    sys.exit(f"ERROR: steps {a}-{b} give {len(set(ts))} timesteps, not {cut} (equal-cuts rule)")
+print(" ".join(map(str, ts)))
+EOF
+
+# Per-row comparison of a baseline run.json with the reference's: prints PASS/FAIL + counts, writes a TSV.
+read -r -d '' COMPARE_REF <<'EOF'
+import sys, json
+ref, run, out = (json.load(open(sys.argv[1]))["rows"], json.load(open(sys.argv[2]))["rows"], sys.argv[3])
+key = lambda r: (r["class_id"], r["seed"])
+a, b = {key(r): r for r in ref}, {key(r): r for r in run}
+lines, n_same = ["class_id\tseed\tfile\tref_tensor_sha256\trun_tensor_sha256\tstatus"], 0
+for k in [key(r) for r in run] + [k for k in (key(r) for r in ref) if k not in b]:
+    x, y = a.get(k), b.get(k)
+    if x is None:
+        status = "MISSING_IN_REF"
+    elif y is None:
+        status = "MISSING_IN_RUN"
+    else:
+        status = "identical" if x["tensor_sha256"] == y["tensor_sha256"] else "DIFFERENT"
+    n_same += status == "identical"
+    r = y or x
+    lines.append(f"{k[0]}\t{k[1]}\t{r['file']}\t{(x or {}).get('tensor_sha256', '-')}\t{(y or {}).get('tensor_sha256', '-')}\t{status}")
+open(out, "w").write("\n".join(lines) + "\n")
+ok = n_same == len(a) == len(b) and [key(r) for r in ref] == [key(r) for r in run]
+print(f"{'PASS' if ok else 'FAIL'} {n_same}/{len(b)} rows identical (reference {len(a)} rows"
+      f"{'' if [key(r) for r in ref] == [key(r) for r in run] else ', row order or set differs'})")
+EOF
+
+# One line from an arm's experiment.json: the pairing check and how many images changed.
+read -r -d '' PAIRING <<'EOF'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1]) / "experiment.json"
+if not p.is_file():
+    print("not recorded"); sys.exit()
+e = json.loads(p.read_text())
+if e["role"] == "baseline":
+    print("baseline"); sys.exit()
+q = e["pairing"]
+msg = f"{'OK' if q['ok'] else 'FAILED'} {q['rows_changed']}/{q['n_rows']} changed"
+if q["ok"] and q["rows_changed"] == 0:
+    msg += "  WARNING: removal changed no image"
+print(msg + "".join(f"  | {x}" for x in q["errors"]))
+EOF
+
+GEN_ENV=() GEN_OPTS=() REC_OPTS=()   # per-arm settings, set by the caller of run_arm
+
+generate() {   # generate <out-dir> <config>: runner.generate with GEN_ENV (environment) and GEN_OPTS (options)
+    local out="$1" config="$2" sampler="" status
+    mkdir -p "$(dirname "$out")"
+    if command -v nvidia-smi >/dev/null 2>&1; then   # peak GPU memory, sampled once a second
+        nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -l 1 > "$out.vram.log" 2>/dev/null &
+        sampler=$!
+    fi
+    env ${GEN_ENV[@]+"${GEN_ENV[@]}"} python -m runner.generate --config "$config" --manifest "$MANIFEST" \
+        --batch-size $BATCH --out-dir "$out" ${GEN_OPTS[@]+"${GEN_OPTS[@]}"}
+    status=$?
+    [[ -n "$sampler" ]] && kill "$sampler" 2>/dev/null
+    return $status
+}
+
+record() {   # record <run-dir> <model> <arm> [schema record options ...]
+    local dir="$1" model="$2" arm="$3" vram=()
+    shift 3
+    [[ -s "$dir.vram.log" ]] && vram=(--vram-log "$dir.vram.log")
+    python -m lanes.p2.schema record "$dir" --lane p1 --experiment "p1_${model}_${EXP_TAG}_$JOB" --arm "$arm" \
+        ${vram[@]+"${vram[@]}"} "$@"
+}
+
+run_arm() {   # run_arm <model> <arm> <config>: generate, record (pairing check), image distance, quality
+    local model="$1" name="$2" config="$3" dir="$OUT/$1/$2" base="$OUT/$1/baseline"
+    ARMS+=("$model/$name")
+    step "$model/$name:generate" generate "$dir" "$config" || return 1
+    if [[ "$name" == baseline ]]; then
+        step "$model/$name:record" record "$dir" "$model" "$name" || return 1
+    else
+        step "$model/$name:record" record "$dir" "$model" "$name" --baseline "$base" \
+            ${REC_OPTS[@]+"${REC_OPTS[@]}"} || return 1
+        step "$model/$name:images" python -m lanes.p2.analyze images "$dir" --baseline "$base" || return 1
+    fi
+    if [[ "$QUALITY" == 1 ]]; then
+        step "$model/$name:quality" python -m lanes.p2.quality "$dir" || return 1
+    fi
+}
+
+bad_arm() {   # bad_arm <model> <arm> <message>: an arm rejected before it ran
+    echo "FAILED: $1 $2: $3"
+    ARMS+=("$1/$2")
+    printf '%s\t%s\t%s\n' "$1/$2:spec" 1 0 >> "$OUT/steps.tsv"
+    FAILED=1
+}
+
+var_arms() {
+    local spec name list scales n
+    GEN_ENV=() GEN_OPTS=() REC_OPTS=()
+    if [[ "$P3_RIDEALONG" == 1 ]]; then   # Observe only: images stay identical to the clean baseline
+        GEN_ENV=("P3_OUT=$OUT/p3_var_stages") GEN_OPTS=(--hook lanes/p3/p3_observe.py:var_stages)
+    fi
+    echo; echo "== var baseline"
+    run_arm var baseline "$VAR_CONFIG" || { echo "FAILED: var baseline; skipping the VAR arms"; FAILED=1; return; }
+    for spec in $VAR_ARMS; do
+        name="${spec%%:*}" list="${spec#*:}"
+        if [[ "$spec" != *:* || ! "$name" =~ ^[A-Za-z0-9_]+$ || ! "$list" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+            bad_arm var "${name:-?}" "bad arm '$spec' (expected NAME:S,S,S)"; continue
+        fi
+        [[ "$name" != baseline && " ${ARMS[*]} " != *" var/$name "* ]] \
+            || { bad_arm var "$name" "arm name used twice (or 'baseline')"; continue; }
+        scales="${list//,/ }"
+        n=$(wc -w <<< "$scales")
+        (( n == VAR_CUT )) || { bad_arm var "$name" "removes $n scales, not $VAR_CUT (equal-cuts rule)"; continue; }
+        echo; echo "== var $name: remove scales $scales"
+        GEN_ENV=("P1_VAR_SCALES=$scales") GEN_OPTS=(--hook lanes/p1/hooks.py:remove_scales)
+        REC_OPTS=(--param removal=var_b --param "scales=[$list]" --param "n_removed=$n")
+        run_arm var "$name" "$VAR_CONFIG" || { echo "FAILED: var $name"; FAILED=1; }
+    done
+}
+
+dit_arms() {
+    local spec name range a b ts
+    GEN_ENV=() GEN_OPTS=() REC_OPTS=()   # no P3 ride-along on DiT
+    echo; echo "== dit baseline"
+    run_arm dit baseline "$DIT_CONFIG" || { echo "FAILED: dit baseline; skipping the DiT arms"; FAILED=1; return; }
+    for spec in $DIT_ARMS; do
+        name="${spec%%:*}" range="${spec#*:}"
+        if [[ "$spec" != *:* || ! "$name" =~ ^[A-Za-z0-9_]+$ || ! "$range" =~ ^[0-9]+-[0-9]+$ ]]; then
+            bad_arm dit "${name:-?}" "bad arm '$spec' (expected NAME:A-B)"; continue
+        fi
+        [[ "$name" != baseline && " ${ARMS[*]} " != *" dit/$name "* ]] \
+            || { bad_arm dit "$name" "arm name used twice (or 'baseline')"; continue; }
+        a="${range%-*}" b="${range#*-}"
+        ts="$(python -c "$TO_TIMESTEPS" "$OUT/dit/baseline/run.json" "$a" "$b" "$DIT_CUT")" \
+            || { bad_arm dit "$name" "steps $range could not be converted to $DIT_CUT timesteps (see ERROR above)"; continue; }
+        echo; echo "== dit $name: skip steps $a-$b = timesteps $ts"
+        GEN_ENV=() GEN_OPTS=(--skip-timesteps $ts)
+        REC_OPTS=(--param removal=dit_skip_burn --param "step_first=$a" --param "step_last=$b"
+                  --param "n_removed=$DIT_CUT" --param "timestep_first=${ts%% *}" --param "timestep_last=${ts##* }")
+        run_arm dit "$name" "$DIT_CONFIG" || { echo "FAILED: dit $name"; FAILED=1; }
+    done
+}
+
+hash_check() {   # hash_check <model>: this job's baseline vs BASELINE_REF, row by row
+    local mine="$OUT/$1/baseline/run.json" ref="$BASELINE_REF/${REF_DIR[$1]}/run.json"
+    if [[ ! -d "$BASELINE_REF" ]]; then echo "SKIPPED (reference $BASELINE_REF not found)"
+    elif [[ ! -f "$ref" ]]; then echo "SKIPPED (no $ref)"
+    elif [[ ! -f "$mine" ]]; then echo "FAIL (this job's $1 baseline has no run.json)"
+    else python -c "$COMPARE_REF" "$ref" "$mine" "$OUT/$1/hash_vs_ref.tsv" || echo "FAIL (comparison error)"
+    fi
+}
+
+[[ "$RUN_VAR" == 1 ]] && var_arms
+[[ "$RUN_DIT" == 1 ]] && dit_arms
+
+step collect python -m lanes.p2.schema collect "$OUT" --out "$OUT/tables" || FAILED=1
+
+# summary.txt
+declare -A HASH=()
+for m in var dit; do
+    flag="RUN_${m^^}"
+    if [[ "${!flag}" == 1 ]]; then HASH[$m]="$(hash_check "$m")"; else HASH[$m]="not run"; fi
+    [[ "${HASH[$m]}" == FAIL* ]] && FAILED=1
+done
+BAD="$(awk -F'\t' '$2 != 0 { printf "%s%s", sep, $1; sep = " " }' "$OUT/steps.tsv")"
+{
+    echo "P1 STAGE REMOVAL ($EXP_TAG)  job $PBS_JOBID  $(date -Is)"
+    echo "RESULT: $([[ "$FAILED" == 0 ]] && echo OK || echo FAILED)${BAD:+  (failed steps: $BAD)}"
+    echo
+    echo "git commit       $COMMIT${DIRTY:+ (tracked files modified)}"
+    echo "settings         ${SETTINGS:-<none>}"
+    echo "manifest         $MANIFEST"
+    echo "manifest sha256  $MANIFEST_SHA"
+    echo "rows             $ROWS"
+    echo "batch size       $BATCH"
+    echo "VAR arms         $([[ "$RUN_VAR" == 1 ]] && echo "$VAR_ARMS" || echo "not run")  ($VAR_CONFIG)"
+    echo "DiT arms         $([[ "$RUN_DIT" == 1 ]] && echo "$DIT_ARMS" || echo "not run")  ($DIT_CONFIG)"
+    echo "quality          $QUALITY"
+    echo "P3 ride-along    $P3_RIDEALONG"
+    echo
+    printf '%-20s  %-8s  %-6s  %-6s  %-7s  %-8s  %s\n' run generate record images quality seconds pairing
+    for a in ${ARMS[@]+"${ARMS[@]}"}; do
+        secs=0
+        for s in generate record images quality; do
+            v="$(step_field "$a:$s" 3)"; [[ "$v" == - ]] || secs=$((secs + v))
+        done
+        if [[ "$(step_field "$a:spec" 2)" != - ]]; then pairing="rejected before running (see job.log)"
+        else pairing="$(python -c "$PAIRING" "$OUT/$a")"; fi
+        printf '%-20s  %-8s  %-6s  %-6s  %-7s  %-8s  %s\n' "$a" "$(step_field "$a:generate" 2)" \
+            "$(step_field "$a:record" 2)" "$(step_field "$a:images" 2)" "$(step_field "$a:quality" 2)" "$secs" "$pairing"
+    done
+    echo "(exit codes; - = not run. pairing: lanes/p2/schema.py check against this job's baseline)"
+    echo
+    echo "baseline vs reference $BASELINE_REF (tensor_sha256 per row):"
+    for m in var dit; do
+        printf '  %-4s -> %-8s %s\n' "$m" "${REF_DIR[$m]}" "${HASH[$m]}"
+    done
+    if [[ "$P3_RIDEALONG" == 1 && "$RUN_VAR" == 1 ]]; then
+        echo
+        echo "P3 ride-along: $OUT/p3_var_stages  ($(find "$OUT/p3_var_stages" -name '*.npz' 2>/dev/null | wc -l) .npz files)"
+        [[ -f "$OUT/p3_var_stages/_failures.log" ]] && echo "  WARNING: $OUT/p3_var_stages/_failures.log exists"
+    fi
+    echo
+    echo "tables: $OUT/tables  (collect exit $(step_field collect 2))"
+    for m in var dit; do
+        if [[ -f "$OUT/$m/hash_vs_ref.tsv" ]]; then
+            echo
+            echo "per-row hash comparison, $m baseline vs $BASELINE_REF/${REF_DIR[$m]} ($OUT/$m/hash_vs_ref.tsv):"
+            column -t -s $'\t' "$OUT/$m/hash_vs_ref.tsv" 2>/dev/null || cat "$OUT/$m/hash_vs_ref.tsv"
+        fi
+    done
+} > "$OUT/summary.txt"
+cat "$OUT/summary.txt"
+echo "code: $(git rev-parse --abbrev-ref HEAD) $(git log -1 --oneline)"
+echo "Summary: $OUT/summary.txt"
+if [[ "$FAILED" == 0 ]]; then echo "P1 DONE: all runs recorded and paired"; else echo "P1 FAILED: see above"; fi
+exit "$FAILED"
