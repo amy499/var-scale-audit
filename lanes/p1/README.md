@@ -8,7 +8,9 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 |---|---|
 | `hooks.py` | `remove_scales`: VAR removal, variant (b), scales from `P1_VAR_SCALES` |
 | `jobs/gateb.pbs` | Baseline + removal arms per model, scoring, tables, `summary.txt` |
-| `jobs/gateb_var.env`, `jobs/gateb_dit.env` | Gate B settings: the mid arm only, for now |
+| `jobs/gateb_var.env`, `jobs/gateb_dit.env` | Gate B settings: the mid arm only |
+| `jobs/sweep_var.env`, `jobs/sweep_dit.env` | Necessity sweep: early, mid and late arms per model |
+| `jobs/sanity_var.env` | Positive control for the VAR hook: scale 9 alone, scale 0 alone |
 
 ## What "removal" means
 
@@ -41,7 +43,25 @@ Each arm removes the same number of stages: **3 VAR scales**, **83 DiT steps** (
 
 DiT step indices are converted to timesteps from this job's own DiT baseline `run.json` (`stages`
 table, `step` -> `timestep_in`). The job stops that arm if an index or timestep is not in the table,
-or if the range does not give exactly 83 timesteps. VAR arms must list exactly 3 scales.
+or if the range does not give exactly 83 timesteps. VAR arms must list exactly 3 scales (`VAR_CUT`;
+`sanity_var.env` sets it to 1 for its single-scale arms).
+
+## Controls
+
+- **Clean baseline.** Each job's baselines must be byte-identical (`tensor_sha256`, every row) to job
+  25665469; `summary.txt` reports the comparison and the job fails on a mismatch.
+- **Matched groups.** The three equal-cut groups are matched to each other: same number of stages
+  (3 scales, 83 steps), only their position differs.
+- **No random-cut arm.** Scales and steps are not exchangeable (each has its own resolution or noise
+  level), so a random set of stages is not a meaningful null.
+- **Known confound.** The VAR groups remove 14 / 77 / 525 of 680 tokens: position and token budget move
+  together, and VAR results cannot separate them.
+- **Hook positive control** (`jobs/sanity_var.env`). Removing scale 9 alone should give a near-normal
+  dog. If it does not, the hook is wrong and no VAR result is valid. Scale 0 alone is reported alongside
+  it.
+- **Gate B observation** (jobs 25891860 VAR / 25891861 DiT). VAR `remove_mid` gave fur texture with no
+  dog shape; DiT `remove_mid` gave disfigured but recognisable dogs. Interpretation is pending the
+  positive control.
 
 ## How to run
 
@@ -53,6 +73,10 @@ mkdir -p outputs/p1/pbs
 python -m lanes.p2.quality --download          # once, on the login node: classifier weights for QUALITY=1
 qsub -v SETTINGS=lanes/p1/jobs/gateb_var.env lanes/p1/jobs/gateb.pbs
 qsub -v SETTINGS=lanes/p1/jobs/gateb_dit.env lanes/p1/jobs/gateb.pbs
+
+qsub -v SETTINGS=lanes/p1/jobs/sanity_var.env lanes/p1/jobs/gateb.pbs   # hook positive control, ~4 min
+qsub -v SETTINGS=lanes/p1/jobs/sweep_var.env lanes/p1/jobs/gateb.pbs    # VAR early/mid/late, ~5 min
+qsub -v SETTINGS=lanes/p1/jobs/sweep_dit.env lanes/p1/jobs/gateb.pbs    # DiT early/mid/late, ~26 min
 tail -f outputs/p1/<JOBID>/job.log             # ends with "P1 DONE: all runs recorded and paired"
 ```
 
