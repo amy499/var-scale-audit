@@ -1,0 +1,197 @@
+{
+  "owner": "P3",
+  "images": "sample photos",
+  "n_images": 5,
+  "thresholds": {
+    "monotonicity": 0.9,
+    "direction": 1.0,
+    "sensitivity": 0.02
+  },
+  "var_scale_ladder": [
+    {
+      "si": 0,
+      "grid": "1x1",
+      "tokens": 1,
+      "cum_pct": 0.15,
+      "spec_centroid": NaN,
+      "grad_energy": 2.97239233024e-17,
+      "hf_ratio": NaN
+    },
+    {
+      "si": 1,
+      "grid": "2x2",
+      "tokens": 4,
+      "cum_pct": 0.74,
+      "spec_centroid": 0.015675824001465145,
+      "grad_energy": 0.001058642371299687,
+      "hf_ratio": 4.38790928739029e-09
+    },
+    {
+      "si": 2,
+      "grid": "3x3",
+      "tokens": 9,
+      "cum_pct": 2.06,
+      "spec_centroid": 0.015702763776501823,
+      "grad_energy": 0.001714805987945244,
+      "hf_ratio": 3.956175548184957e-09
+    },
+    {
+      "si": 3,
+      "grid": "4x4",
+      "tokens": 16,
+      "cum_pct": 4.41,
+      "spec_centroid": 0.015672483980445576,
+      "grad_energy": 0.002274116483777196,
+      "hf_ratio": 6.236808100220232e-09
+    },
+    {
+      "si": 4,
+      "grid": "5x5",
+      "tokens": 25,
+      "cum_pct": 8.09,
+      "spec_centroid": 0.01587302260345068,
+      "grad_energy": 0.002752231842446974,
+      "hf_ratio": 1.0892128385428815e-08
+    },
+    {
+      "si": 5,
+      "grid": "6x6",
+      "tokens": 36,
+      "cum_pct": 13.38,
+      "spec_centroid": 0.016212205964042107,
+      "grad_energy": 0.0033017608775590137,
+      "hf_ratio": 2.0153824219571116e-08
+    },
+    {
+      "si": 6,
+      "grid": "8x8",
+      "tokens": 64,
+      "cum_pct": 22.79,
+      "spec_centroid": 0.017852145106299906,
+      "grad_energy": 0.004467734833173149,
+      "hf_ratio": 5.7893339475265865e-08
+    },
+    {
+      "si": 7,
+      "grid": "10x10",
+      "tokens": 100,
+      "cum_pct": 37.5,
+      "spec_centroid": 0.018381756910292663,
+      "grad_energy": 0.005263227612952265,
+      "hf_ratio": 1.0357556785791129e-07
+    },
+    {
+      "si": 8,
+      "grid": "13x13",
+      "tokens": 169,
+      "cum_pct": 62.35,
+      "spec_centroid": 0.0218858238104342,
+      "grad_energy": 0.006854811904679648,
+      "hf_ratio": 4.784680508971507e-07
+    },
+    {
+      "si": 9,
+      "grid": "16x16",
+      "tokens": 256,
+      "cum_pct": 100.0,
+      "spec_centroid": 0.022648772657136114,
+      "grad_energy": 0.007855481604938715,
+      "hf_ratio": 1.4398568553258627e-06
+    }
+  ],
+  "results": [
+    {
+      "degradation": "blur",
+      "metric": "spec_centroid",
+      "expected": -1,
+      "rho": -1.0,
+      "direction": 1.0,
+      "sensitivity": 0.1787,
+      "verdict": "PASS"
+    },
+    {
+      "degradation": "blur",
+      "metric": "grad_energy",
+      "expected": -1,
+      "rho": -1.0,
+      "direction": 1.0,
+      "sensitivity": 0.1555,
+      "verdict": "PASS"
+    },
+    {
+      "degradation": "blur",
+      "metric": "hf_ratio",
+      "expected": -1,
+      "rho": -1.0,
+      "direction": 1.0,
+      "sensitivity": 0.4263,
+      "verdict": "PASS"
+    },
+    {
+      "degradation": "noise",
+      "metric": "spec_centroid",
+      "expected": 1,
+      "rho": 1.0,
+      "direction": 1.0,
+      "sensitivity": 0.0066,
+      "verdict": "WEAK (insensitive)"
+    },
+    {
+      "degradation": "noise",
+      "metric": "grad_energy",
+      "expected": 1,
+      "rho": 1.0,
+      "direction": 1.0,
+      "sensitivity": 0.0497,
+      "verdict": "PASS"
+    },
+    {
+      "degradation": "noise",
+      "metric": "hf_ratio",
+      "expected": 1,
+      "rho": 1.0,
+      "direction": 1.0,
+      "sensitivity": 0.0204,
+      "verdict": "PASS"
+    },
+    {
+      "degradation": "downsample",
+      "metric": "spec_centroid",
+      "expected": -1,
+      "rho": -1.0,
+      "direction": 1.0,
+      "sensitivity": 0.2855,
+      "verdict": "PASS"
+    },
+    {
+      "degradation": "downsample",
+      "metric": "grad_energy",
+      "expected": -1,
+      "rho": -1.0,
+      "direction": 1.0,
+      "sensitivity": 0.2291,
+      "verdict": "PASS"
+    },
+    {
+      "degradation": "downsample",
+      "metric": "hf_ratio",
+      "expected": -1,
+      "rho": -1.0,
+      "direction": 1.0,
+      "sensitivity": 0.7239,
+      "verdict": "PASS"
+    }
+  ],
+  "metric_roles": {
+    "latent_rel_dist": "PRIMARY \u2014 decoder-independent, both models",
+    "grad_energy": "PRIMARY pixel metric \u2014 only one with real range on the VAR ladder",
+    "spec_centroid": "SUPPORTING \u2014 graded but compressed on the VAR ladder",
+    "hf_ratio": "LATE STAGES ONLY \u2014 ~0 across the whole VAR ladder",
+    "pixel_entropy": "DROPPED 2026-10-01 \u2014 failed direction and sensitivity"
+  },
+  "warnings": [
+    "blur and noise move every frequency metric in OPPOSITE directions; VAR's early scales are blur-like, DiT's early timesteps are noise-like, so the same metric means opposite things in the two models",
+    "flat images (VAR si=0) must return NaN: a constant image otherwise yields a plausible spec_centroid of 0.556 built entirely from floating-point noise",
+    "pixel metrics run on DECODED intermediates, so they measure the model's commitment and the VQVAE decoder's behaviour together; latent_rel_dist avoids this"
+  ]
+}
