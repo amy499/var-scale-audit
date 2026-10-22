@@ -18,8 +18,13 @@ independence rule requires it — P4's protocol uses predeclared stages and must
 
 | Record | |
 |---|---|
-| Sent to P3 | *(fill when sent)* |
-| Outcome | *(fill: signed off / objected / no reply)* |
+| Sent to P3 | *(send date not recorded)* |
+| Outcome | **Signed off by P3** (reply received by 22 Oct): yes to all three questions; P3 independently recomputed the VAR token arithmetic (77/680 = 11.32%, 7/2/1 token-mass split). Two conditions added below. |
+
+**Conditions from P3's sign-off**
+
+- **Metric floor on VAR's early band.** On VAR's own scale grids `hf_ratio` is identically 0.000000 for every scale from 2×2 to 16×16, and `spec_centroid` moves only 0.0157 → 0.0226 across `si` 1–9 (0.0934 for the full image). A flat pixel-space curve across the early band is a floor effect, not a finding. Any Figure 4 / report result using a pixel-space quality metric must carry this caveat. Reproduce with `python -m lanes.p3.calibrate_metrics`.
+- **Control arm is mandatory for VAR middle-band results.** At small `m`, protect lands entirely in late (`si` 6–9), which holds 86.6% of tokens, so without the control arm that result cannot be separated from "late is special". Never report a VAR middle-band protect/damage contrast without its control.
 
 ---
 
@@ -106,8 +111,9 @@ nothing. Only DiT's savings are measured.
 
 - **The protect arm is narrowed.** The plan §4 says "protect important scales while degrading the
   others", which taken literally gives protect `n − k` stages against damage's `k` — different budgets,
-  so neither result could be attributed to placement. P4 uses one shared budget instead. **P1 should
-  confirm before GPU time is spent.**
+  so neither result could be attributed to placement. P4 uses one shared budget instead (KTD6).
+  **Status: approved by P4 on 22 Oct 2026 and P3 signed off on the construction (Q3).** P1 has not
+  confirmed; P4 proceeds to GPU on this basis. If P1 later objects, only the protect arms are re-run.
 - **Two doc corrections.** `docs/hook_interface.md` open question 2 calls DiT's step and noise bases
   "nearly equal"; at the index midpoint they read **0.498** and **0.039**. The thing at 0.4975 is
   *normalized timestep*. And the `docs/HANDOVER.md` glossary calls `p` "comparable across models"
