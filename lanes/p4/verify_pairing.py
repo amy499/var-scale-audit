@@ -83,7 +83,7 @@ def compare(baseline_dir: Path, arm_dir: Path) -> dict:
 
 
 def planned_arms(root: Path) -> list[str] | None:
-    """The arm directory names lanes/p4/pilot.py intended, or None when no plan was written."""
+    """The run paths relative to `root` that lanes/p4/pilot.py intended, or None when absent."""
     plan = Path(root) / PLAN_FILE
     if not plan.is_file():
         return None
@@ -132,7 +132,12 @@ def main(argv=None):
     root = args.paths[0] if not args.baseline and len(args.paths) == 1 else baseline.parent
     planned = planned_arms(root)
     if planned is not None:
-        present = {d.name for d in arm_dirs} | {baseline.name}
+        try:
+            present = {d.relative_to(root).as_posix() for d in arm_dirs} | {baseline.relative_to(root).as_posix()}
+        except ValueError as e:
+            print(f"   FAIL  a run directory is outside the planned root {root}: {e}")
+            present = set()
+            ok = False
         missing = [name for name in planned if name not in present]
         if missing:
             print(f"   FAIL  the pilot planned {len(planned)} runs; these never produced a run.json: "
@@ -153,7 +158,8 @@ def main(argv=None):
         status = "PASS" if r["ok"] else "FAIL"
         detail = (f"{r['n_rows']}/{r['n_baseline_rows']} rows paired   "
                   f"{r['rows_changed']} of {r['n_rows']} images changed")
-        print(f"   {status}  {arm_dir.name:<16} {detail}" + ("  (file order differs)" if r["reordered"] else ""))
+        label = arm_dir.relative_to(root).as_posix() if arm_dir.is_relative_to(root) else arm_dir.name
+        print(f"   {status}  {label:<24} {detail}" + ("  (file order differs)" if r["reordered"] else ""))
         for message in r["errors"]:
             print(f"         ERROR   {message}")
         for message in r["warnings"]:

@@ -369,6 +369,28 @@ def check_driver(c: Checks, tiny_dir: Path, work: Path):
                 c.equal(f"{model} {r['arm']} m={r['m']}: the skip list is exactly the arm's stages",
                         [int(x) for x in skip], stages)
 
+    # --- Phase C: one baseline per model, then all predeclared bands at the same arm/budget grid.
+    for model, config in (("var", REPO / "configs" / "var_d20.yaml"),
+                          ("dit", REPO / "configs" / "dit_xl2_256.yaml")):
+        full_root = work / f"full_{model}"
+        full = pilot.plan_full_runs(model, config, Path("manifest/provisional_4x4.csv"), full_root)
+        c.equal(f"{model}: the full sweep has one baseline plus 27 arm runs", len(full), 28)
+        c.equal(f"{model}: the full sweep baseline is first", full[0]["arm"], arms.BASELINE)
+        c.equal(f"{model}: the full sweep has one baseline directory",
+                [r["out_dir"] for r in full if r["arm"] == arms.BASELINE],
+                [str(full_root / arms.BASELINE)])
+        c.that(f"{model}: every full-sweep run writes to a unique directory",
+               len({r["out_dir"] for r in full}) == len(full))
+        for band in bands.BANDS:
+            band_runs = [r for r in full if r["band"] == band]
+            c.equal(f"{model} {band}: full sweep has 3 arms at 3 budgets", len(band_runs), 9)
+            c.equal(f"{model} {band}: full-sweep arm labels repeat only across budgets",
+                    sorted((r["arm"], r["m"]) for r in band_runs),
+                    sorted((arm, m) for m in sorted({r["m"] for r in band_runs})
+                           for arm in arms.INTERVENED_ARMS))
+            c.that(f"{model} {band}: every arm lives beneath its candidate band",
+                   all(Path(r["out_dir"]).parent.name == band for r in band_runs))
+
     # --- a dry run plans the same work and writes nothing
     dry_root = work / "dry"
     dry = pilot.plan_runs("var", "middle", REPO / "configs" / "var_d20.yaml",
