@@ -37,6 +37,7 @@ RUN_VAR="${RUN_VAR:-1}"
 RUN_DIT="${RUN_DIT:-1}"
 QUALITY="${QUALITY:-1}"                                 # 1: classifier + Inception features (lanes/p2/quality.py)
 P3_RIDEALONG="${P3_RIDEALONG:-0}"                       # 1: P3's observe hook on the VAR baseline (never DiT)
+KEEP_RAW="${KEEP_RAW:-1}"                               # 0: delete each run's *.pt once it is fully scored (see drop_raw)
 BASELINE_REF="${BASELINE_REF:-outputs/baseline/25665469}"   # jobs/baseline.pbs output the baselines must match
 EXP_TAG="${EXP_TAG:-gateb}"
 BATCH=16
@@ -79,7 +80,7 @@ DIRTY="$(git status --porcelain --untracked-files=no 2>/dev/null | head -c1)"
 MANIFEST_SHA="$(sha256sum "$MANIFEST" | cut -d' ' -f1)"
 ROWS="$(python -c "import sys; from runner.manifest import load_manifest; print(len(load_manifest(sys.argv[1])))" "$MANIFEST")"
 echo "settings: ${SETTINGS:-<none>}  manifest: $MANIFEST (${MANIFEST_SHA:0:12}, $ROWS rows)"
-echo "VAR arms: [$VAR_ARMS]  DiT arms: [$DIT_ARMS]  quality: $QUALITY  P3 ride-along: $P3_RIDEALONG  reference: $BASELINE_REF"
+echo "VAR arms: [$VAR_ARMS]  DiT arms: [$DIT_ARMS]  quality: $QUALITY  P3 ride-along: $P3_RIDEALONG  reference: $BASELINE_REF  keep raw: $KEEP_RAW"
 if [[ "$QUALITY" == 1 ]]; then   # quality.py never downloads unless asked; say so once, up front
     WEIGHTS="$(python -c "from pathlib import Path; from lanes.p2.quality import WEIGHTS_DIR, WEIGHTS_URL; print(WEIGHTS_DIR / Path(WEIGHTS_URL).name)")"
     [[ -f "$WEIGHTS" ]] || echo "WARNING: classifier weights missing ($WEIGHTS): every quality step will fail." \
@@ -188,6 +189,23 @@ run_arm() {   # run_arm <model> <arm> <config>: generate, record (pairing check)
     if [[ "$QUALITY" == 1 ]]; then
         step "$model/$name:quality" python -m lanes.p2.quality "$dir" || return 1
     fi
+    # Reached only when every step above succeeded. The baseline's are kept until all arms have finished.
+    if [[ "$KEEP_RAW" == 0 && "$name" != baseline ]]; then
+        step "$model/$name:drop_raw" drop_raw "$dir" || return 1
+    fi
+}
+
+drop_raw() {   # drop_raw <run-dir>: delete the run's raw tensors (*.pt; tensor_sha256 stays in run.json)
+    local real out ref n
+    real="$(realpath -e "$1")" && out="$(realpath -e "$OUT")" || { echo "drop_raw: cannot resolve $1"; return 1; }
+    ref="$(realpath -m "$BASELINE_REF")"
+    # Only a run directory strictly inside this job's output directory, and never the reference baseline.
+    if [[ "$real" != "$out"/?* || "$real" == "$ref" || "$real" == "$ref"/* || ! -f "$real/run.json" ]]; then
+        echo "drop_raw: refusing to delete in $1 (not a run directory inside $OUT, or the reference)"; return 1
+    fi
+    n=$(find "$real" -maxdepth 1 -type f -name '*.pt' | wc -l)
+    find "$real" -maxdepth 1 -type f -name '*.pt' -delete || return 1
+    echo "drop_raw: removed $n raw tensors from $1"
 }
 
 bad_arm() {   # bad_arm <model> <arm> <message>: an arm rejected before it ran
@@ -257,6 +275,20 @@ hash_check() {   # hash_check <model>: this job's baseline vs BASELINE_REF, row 
 [[ "$RUN_VAR" == 1 ]] && var_arms
 [[ "$RUN_DIT" == 1 ]] && dit_arms
 
+# Baselines' raw tensors: only now that every arm has finished, and only if no step of the job failed
+# (otherwise they are kept for debugging).
+if [[ "$KEEP_RAW" == 0 ]]; then
+    for m in var dit; do
+        b="$OUT/$m/baseline"
+        [[ -f "$b/run.json" ]] || continue
+        if [[ "$FAILED" == 0 && -z "$(awk -F'\t' '$2 != 0' "$OUT/steps.tsv")" ]]; then
+            step "$m/baseline:drop_raw" drop_raw "$b" || FAILED=1
+        else
+            echo "keeping $b/*.pt: a step of this job failed"
+        fi
+    done
+fi
+
 step collect python -m lanes.p2.schema collect "$OUT" --out "$OUT/tables" || FAILED=1
 
 # summary.txt
@@ -281,6 +313,7 @@ BAD="$(awk -F'\t' '$2 != 0 { printf "%s%s", sep, $1; sep = " " }' "$OUT/steps.ts
     echo "DiT arms         $([[ "$RUN_DIT" == 1 ]] && echo "$DIT_ARMS" || echo "not run")  ($DIT_CONFIG)"
     echo "quality          $QUALITY"
     echo "P3 ride-along    $P3_RIDEALONG"
+    echo "keep raw (.pt)   $KEEP_RAW"
     echo
     printf '%-20s  %-8s  %-6s  %-6s  %-7s  %-8s  %s\n' run generate record images quality seconds pairing
     for a in ${ARMS[@]+"${ARMS[@]}"}; do

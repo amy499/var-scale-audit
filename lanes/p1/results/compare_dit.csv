@@ -1,0 +1,3 @@
+job,model,arm_a,arm_b,n,cls_top1_a,cls_top1_b,diff_cls_top1,diff_cls_top1_lo,diff_cls_top1_hi,cls_prob_a,cls_prob_b,diff_cls_prob,diff_cls_prob_lo,diff_cls_prob_hi
+25893213,dit,remove_mid,remove_late,224,0.7366,0.6562,0.0804,0.0,0.1652,0.5715,0.4927,0.0788,0.0139,0.144
+25893213,dit,remove_early,remove_mid,224,0.8259,0.7366,0.0893,0.0134,0.1652,0.6805,0.5715,0.1091,0.0476,0.1703
