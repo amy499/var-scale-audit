@@ -10,17 +10,16 @@
 #     qsub -P <your-project-id> lanes/p4/jobs/pilot_var.pbs
 # then confirm:  qstat -f <JOBID> | grep -i project     (qdel if it is not your project)
 #
-# 10 runs: the no-hook baseline first, then protect / damage / control at m = 1, 2, 3 scales
-# (m/n = 0.1, 0.2, 0.3 of the 10 scales), all at lambda = 0, batch 16, one batch per run.
-# Walltime: VAR-d20 fp32 is ~95 s per 1000 images, so 16 images is ~1.5 s; model load dominates at
-# ~1-2 min per process. 10 processes -> ~20 min. 45 min leaves headroom for a slow filesystem.
+# Uses the frozen 224-image manifest by default. 10 runs: baseline, then protect / damage / control
+# at m = 1, 2, 3 scales (0.1, 0.2, 0.3 of 10 scales), lambda = 0, batch size 16.
+# Runtime estimates based on the old 16-image provisional manifest do not apply to this full run.
 set -uo pipefail
 [[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
 cd "$PBS_O_WORKDIR"
 [[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
 
 CONFIG="${VAR_CONFIG:-configs/var_d20.yaml}"
-MANIFEST="${MANIFEST:-manifest/provisional_4x4.csv}"   # switch to P3's frozen manifest once it exists
+MANIFEST="${MANIFEST:-manifest/frozen_v1_1.csv}"
 BAND="${BAND:-middle}"
 JOB="${PBS_JOBID%%.*}"
 OUT="${OUT_ROOT:-outputs/p4}/pilot_var/$JOB"

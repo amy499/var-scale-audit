@@ -10,19 +10,16 @@
 #     qsub -P <your-project-id> lanes/p4/jobs/pilot_dit.pbs
 # then confirm:  qstat -f <JOBID> | grep -i project     (qdel if it is not your project)
 #
-# 10 runs: the no-hook baseline first, then protect / damage / control at m = 25, 50, 75 steps
-# (m/n = 0.1, 0.2, 0.3 of the 250 steps) via --skip-timesteps, batch 16, one batch per run.
-# Walltime: DiT is 31.9 s per batch of 16 (docs/HANDOVER.md 5), so one batch is ~32 s at m = 0 and
-# less for the arms, which evaluate fewer steps; model load dominates at ~2 min per process.
-# 10 processes -> ~25 min. 2 h leaves headroom and keeps the job inside the <= 2 h band.
-# DiT dominates the whole lane's budget: size any sweep from the 31.9 s number, not from VAR's.
+# Uses the frozen 224-image manifest by default. 10 runs: baseline, then protect / damage / control
+# at m = 25, 50, 75 steps (0.1, 0.2, 0.3 of 250 steps), via --skip-timesteps, batch size 16.
+# Runtime estimates based on the old 16-image provisional manifest do not apply to this full run.
 set -uo pipefail
 [[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
 cd "$PBS_O_WORKDIR"
 [[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
 
 CONFIG="${DIT_CONFIG:-configs/dit_xl2_256.yaml}"
-MANIFEST="${MANIFEST:-manifest/provisional_4x4.csv}"   # switch to P3's frozen manifest once it exists
+MANIFEST="${MANIFEST:-manifest/frozen_v1_1.csv}"
 BAND="${BAND:-middle}"
 JOB="${PBS_JOBID%%.*}"
 OUT="${OUT_ROOT:-outputs/p4}/pilot_dit/$JOB"
