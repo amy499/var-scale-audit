@@ -14,7 +14,8 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `jobs/single_var.env` | Single-scale sweep: each of VAR scales 1-8 alone |
 | `jobs/window2_var.env`, `jobs/window3_var.env` | Sliding windows of 2 and 3 neighbouring VAR scales |
 | `summarize.py` | One row per arm: means, paired drops vs baseline with bootstrap CIs, KID; `--compare` for arm vs arm |
-| `results/` | `summarize.py` outputs quoted in this README |
+| `plot_fig1.py` | Figure 1: VAR top-1 by removed scale / window, DiT top-1 per arm, with CIs |
+| `results/` | `summarize.py` outputs and Figure 1, quoted in this README |
 
 ## What "removal" means
 
@@ -104,9 +105,21 @@ between mid and late is not clearly non-zero.
 | 25893211 | VAR sanity (`sanity_var.env`) | scale 0 alone, scale 9 alone |
 | 25893212 | VAR sweep (`sweep_var.env`) | early {0,1,2}, mid {3,4,5}, late {7,8,9} |
 | 25893213 | DiT sweep (`sweep_dit.env`) | early 1-83, mid 84-166, late 167-249 |
+| 25916920 | VAR single scales (`single_var.env`) | each of scales 1-8 alone |
+| 25916921 | VAR 2-scale windows (`window2_var.env`) | {0,1}, {1,2}, ... {8,9} |
+
+`window3_var.env` (the five 3-scale windows not yet run) is held back: the three 3-scale groups already
+run span top-1 0.000-0.107, so further 3-scale windows are unlikely to separate positions.
+
+![Figure 1](results/fig1.png)
+
+Figure 1 (`results/fig1.png`, from `python -m lanes.p1.plot_fig1`; needs matplotlib). Left: VAR top-1
+vs the removed scale (single scales), vs the window's first scale (2-scale windows), and the three
+3-scale groups as labelled points. Right: DiT top-1 per arm. Error bars: 95% bootstrap CI of each arm's
+mean over its 224 images (not the paired CI of the drop in the table). Dashed line: clean baseline.
 
 Table from `lanes/p1/results/results_sweep.csv`, written by
-`python -m lanes.p1.summarize 25893211 25893212 25893213 --out lanes/p1/results/results_sweep.csv`.
+`python -m lanes.p1.summarize 25893211 25893212 25893213 25916920 25916921 --out lanes/p1/results/results_sweep.csv`.
 Means are over the 224 images. Drops are baseline - arm (positive = worse), with 95% paired-bootstrap
 CIs over images (10000 resamples, seed 0). `img_mad255` is the distance from the baseline image
 (0..255). KID is paired, against the job's own baseline.
@@ -124,6 +137,25 @@ CIs over images (10000 resamples, seed 0). `img_mad255` is the distance from the
 | 25893213 | dit | remove_early | 224 | 0.826 | 0.938 | 0.681 | 50.59 | 0.080 [0.027, 0.134] | 0.078 [0.027, 0.129] | 0.00029 |
 | 25893213 | dit | remove_mid | 224 | 0.737 | 0.884 | 0.572 | 46.45 | 0.170 [0.107, 0.237] | 0.187 [0.134, 0.240] | 0.01775 |
 | 25893213 | dit | remove_late | 224 | 0.656 | 0.808 | 0.493 | 20.85 | 0.250 [0.188, 0.317] | 0.266 [0.217, 0.315] | 0.03127 |
+| 25916920 | var | baseline | 224 | 0.942 | 1.000 | 0.812 | | | | |
+| 25916920 | var | remove_s1 | 224 | 0.920 | 0.982 | 0.786 | 60.52 | 0.022 [-0.022, 0.071] | 0.026 [-0.016, 0.070] | 0.00209 |
+| 25916920 | var | remove_s2 | 224 | 0.589 | 0.754 | 0.467 | 51.72 | 0.353 [0.281, 0.424] | 0.346 [0.290, 0.402] | 0.02491 |
+| 25916920 | var | remove_s3 | 224 | 0.469 | 0.603 | 0.346 | 42.77 | 0.473 [0.402, 0.545] | 0.466 [0.413, 0.520] | 0.02846 |
+| 25916920 | var | remove_s4 | 224 | 0.710 | 0.897 | 0.566 | 32.99 | 0.232 [0.174, 0.295] | 0.246 [0.202, 0.293] | 0.00963 |
+| 25916920 | var | remove_s5 | 224 | 0.844 | 0.951 | 0.694 | 27.38 | 0.098 [0.049, 0.147] | 0.118 [0.082, 0.155] | 0.00451 |
+| 25916920 | var | remove_s6 | 224 | 0.732 | 0.902 | 0.583 | 24.61 | 0.210 [0.156, 0.268] | 0.230 [0.187, 0.273] | 0.01244 |
+| 25916920 | var | remove_s7 | 224 | 0.812 | 0.964 | 0.673 | 19.60 | 0.130 [0.080, 0.183] | 0.139 [0.105, 0.175] | 0.00501 |
+| 25916920 | var | remove_s8 | 224 | 0.893 | 0.969 | 0.756 | 15.90 | 0.049 [0.009, 0.094] | 0.056 [0.030, 0.083] | 0.00231 |
+| 25916921 | var | baseline | 224 | 0.942 | 1.000 | 0.812 | | | | |
+| 25916921 | var | remove_s01 | 224 | 0.906 | 0.996 | 0.761 | 70.57 | 0.036 [-0.013, 0.085] | 0.051 [0.009, 0.093] | 0.00414 |
+| 25916921 | var | remove_s12 | 224 | 0.058 | 0.103 | 0.051 | 61.04 | 0.884 [0.835, 0.929] | 0.761 [0.722, 0.799] | 0.06539 |
+| 25916921 | var | remove_s23 | 224 | 0.009 | 0.022 | 0.004 | 50.93 | 0.933 [0.897, 0.964] | 0.808 [0.778, 0.837] | 0.08372 |
+| 25916921 | var | remove_s34 | 224 | 0.076 | 0.125 | 0.046 | 43.43 | 0.866 [0.821, 0.911] | 0.766 [0.731, 0.801] | 0.08095 |
+| 25916921 | var | remove_s45 | 224 | 0.277 | 0.438 | 0.190 | 34.80 | 0.665 [0.603, 0.723] | 0.622 [0.577, 0.666] | 0.06008 |
+| 25916921 | var | remove_s56 | 224 | 0.255 | 0.402 | 0.179 | 30.00 | 0.688 [0.625, 0.746] | 0.634 [0.589, 0.678] | 0.07265 |
+| 25916921 | var | remove_s67 | 224 | 0.473 | 0.732 | 0.346 | 25.60 | 0.469 [0.402, 0.536] | 0.466 [0.420, 0.514] | 0.04702 |
+| 25916921 | var | remove_s78 | 224 | 0.696 | 0.875 | 0.529 | 21.02 | 0.245 [0.188, 0.304] | 0.283 [0.241, 0.326] | 0.02102 |
+| 25916921 | var | remove_s89 | 224 | 0.482 | 0.732 | 0.309 | 17.90 | 0.460 [0.393, 0.527] | 0.503 [0.461, 0.547] | 0.07275 |
 
 Observations (not conclusions):
 - The hook positive control passes: removing scale 9 alone keeps top-1 at 0.835, against 0.942 for the
@@ -135,6 +167,14 @@ Observations (not conclusions):
   0.113 mid), so "least harmful" holds for the classifier metrics only.
 - DiT degrades but survives: top-1 is 0.826 (early), 0.737 (mid) and 0.656 (late), against 0.906 for the
   baseline.
+- Single scales (s0-s9): the largest top-1 drops are at s3 (0.473, top-1 0.469) and s2 (0.353, top-1
+  0.589). Only s0 and s1 have a top-1 drop whose CI includes 0. The drop is not monotone in scale: s6
+  (0.732) is below both s5 (0.844) and s7 (0.812).
+- 2-scale windows: {1,2}, {2,3} and {3,4} give top-1 0.058, 0.009 and 0.076. {0,1} keeps 0.906, its
+  top-1 drop CI including 0. The highest of the other windows is {7,8} at 0.696, and {8,9} is lower at
+  0.482.
+- Every 2-scale window has a lower top-1 than either of its two single-scale arms (point estimates;
+  for {0,1}, 0.906 against 0.911 and 0.920, within the CIs).
 
 ## How to run
 
