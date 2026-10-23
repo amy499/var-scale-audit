@@ -13,9 +13,10 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `jobs/sanity_var.env` | Positive control for the VAR hook: scale 9 alone, scale 0 alone |
 | `jobs/single_var.env` | Single-scale sweep: each of VAR scales 1-8 alone |
 | `jobs/window2_var.env`, `jobs/window3_var.env` | Sliding windows of 2 and 3 neighbouring VAR scales |
-| `summarize.py` | One row per arm: means, paired drops vs baseline with bootstrap CIs, KID; `--compare` for arm vs arm |
+| `summarize.py` | One row per arm: means, paired drops vs baseline with bootstrap CIs, KID; `--compare` for arm vs arm; `--ranking-out` for the ranking |
 | `plot_fig1.py` | Figure 1: VAR top-1 by removed scale / window, DiT top-1 per arm, with CIs |
-| `results/` | `summarize.py` outputs and Figure 1, quoted in this README |
+| `failure_grid.py` | Figure 1b: four fixed example images under each VAR and DiT arm |
+| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `fig1.png`, `fig1b_failures.png` (all quoted below) |
 
 ## What "removal" means
 
@@ -114,12 +115,23 @@ run span top-1 0.000-0.107, so further 3-scale windows are unlikely to separate 
 ![Figure 1](results/fig1.png)
 
 Figure 1 (`results/fig1.png`, from `python -m lanes.p1.plot_fig1`; needs matplotlib). Left: VAR top-1
-vs the removed scale (single scales), vs the window's first scale (2-scale windows), and the three
-3-scale groups as labelled points. Right: DiT top-1 per arm. Error bars: 95% bootstrap CI of each arm's
-mean over its 224 images (not the paired CI of the drop in the table). Dashed line: clean baseline.
+vs the removed scale (single scales), with 2-scale windows and the three labelled 3-scale groups at the
+mean of their removed scales; each scale index shows its token-grid size. Right: DiT top-1 per arm.
+Error bars: 95% bootstrap CI of each arm's mean over its 224 images (not the paired CI of the drop in
+the table). Dashed line: clean baseline.
 
-Table from `lanes/p1/results/results_sweep.csv`, written by
-`python -m lanes.p1.summarize 25893211 25893212 25893213 25916920 25916921 --out lanes/p1/results/results_sweep.csv`.
+![Figure 1b](results/fig1b_failures.png)
+
+Figure 1b (`results/fig1b_failures.png`, from `python -m lanes.p1.failure_grid`; needs matplotlib +
+Pillow): the same four images (first manifest row of each of the first four classes) under each VAR
+and DiT arm, headed by the arm's mean top-1 over all 224 images.
+
+Table from `lanes/p1/results/results_sweep.csv`; `lanes/p1/results/ranking.csv` from the same command:
+`python -m lanes.p1.summarize 25893211 25893212 25893213 25916920 25916921 --out lanes/p1/results/results_sweep.csv --ranking-out lanes/p1/results/ranking.csv`.
+
+`results/ranking.csv`: every removal arm per model, ordered by top-1 drop (largest first), with what it
+removed, how many scales or steps, the VAR tokens removed, and the drop CIs and KID from this table.
+Ties are broken by cls_prob drop, then job and arm: VAR {0,1,2} and {3,4,5} tie on both (0.942 / 0.811).
 Means are over the 224 images. Drops are baseline - arm (positive = worse), with 95% paired-bootstrap
 CIs over images (10000 resamples, seed 0). `img_mad255` is the distance from the baseline image
 (0..255). KID is paired, against the job's own baseline.

@@ -21,6 +21,11 @@ Per pair (--compare JOB:ARM_A,ARM_B, repeatable; --compare-out): two arms of the
 (class_id, seed) rows. diff_cls_top1, diff_cls_prob = mean over images of ARM_A - ARM_B (positive = A
 scores higher), with the same paired bootstrap 95% CI, and each arm's mean.
 
+Ranking (--ranking-out, with --out): read back from the --out CSV just written, every removal arm per
+model, ordered by drop_cls_top1 (largest first; ties by drop_cls_prob, then job and arm), with what it
+removed (VAR scales, DiT step indices and timesteps; from runs.csv params), how many scales or steps, and
+for VAR the tokens removed (sum of n_tokens over the removed scales, from the run's run.json stages table).
+
 Arms come from JOB/tables/runs.csv (written by `schema collect` at the end of every job). Metrics are
 read from RUN_DIR/metrics.csv, or, when the run directory was not copied, from JOB/tables/metrics.csv
 (the same rows, merged by collect).
@@ -28,6 +33,7 @@ read from RUN_DIR/metrics.csv, or, when the run directory was not copied, from J
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -44,6 +50,8 @@ COLUMNS = ("job", "model", "arm", "n", *MEANS,
            *(f"drop_{m}{s}" for m in DROPS for s in ("", "_lo", "_hi")), "kid_vs_base")
 COMPARE_COLUMNS = ("job", "model", "arm_a", "arm_b", "n",
                    *(c for m in DROPS for c in (f"{m}_a", f"{m}_b", f"diff_{m}", f"diff_{m}_lo", f"diff_{m}_hi")))
+RANKING_COLUMNS = ("model", "rank", "job", "arm", "removed", "n_removed", "unit", "tokens_removed", "cls_top1",
+                   *(f"drop_{m}{s}" for m in DROPS for s in ("", "_lo", "_hi")), "kid_vs_base")
 
 
 def _read_csv(path: Path) -> list[dict]:
@@ -161,6 +169,38 @@ def compare(spec: str) -> dict:
     return row
 
 
+def _removal(job: Path, arm: str) -> dict:
+    """What one arm removed: removed, n_removed, unit, tokens_removed (VAR only)."""
+    runs = {r["arm"]: r for r in _read_csv(job / "tables" / "runs.csv")}
+    if arm not in runs:
+        raise SystemExit(f"ERROR: no arm {arm!r} in {job}/tables/runs.csv")
+    r = runs[arm]
+    p = json.loads(r["params"] or "{}")
+    if "scales" in p:
+        stages = json.loads((job / r["run_dir"] / "run.json").read_text())["stages"]
+        tokens = {s["stage"]: s["n_tokens"] for s in stages}
+        return {"removed": "{" + ",".join(map(str, p["scales"])) + "}", "n_removed": len(p["scales"]),
+                "unit": "scales", "tokens_removed": sum(tokens[s] for s in p["scales"])}
+    if "step_first" in p:
+        return {"removed": f"steps {p['step_first']}-{p['step_last']} (t {p['timestep_first']}-{p['timestep_last']})",
+                "n_removed": p["n_removed"], "unit": "steps", "tokens_removed": ""}
+    raise SystemExit(f"ERROR: {job} arm {arm}: params do not say what was removed: {r['params']}")
+
+
+def ranking(results_csv: Path) -> list[dict]:
+    """Every removal arm of results_csv (an --out CSV), per model, by drop in top-1, largest first."""
+    rows = [r for r in _read_csv(results_csv) if r["drop_cls_top1"] != ""]
+    out = []
+    for model in sorted({r["model"] for r in rows}, key=lambda m: (m != "var", m)):
+        ranked = sorted((r for r in rows if r["model"] == model),
+                        key=lambda r: (-float(r["drop_cls_top1"]), -float(r["drop_cls_prob"]), r["job"], r["arm"]))
+        for i, r in enumerate(ranked, 1):
+            out.append({"model": model, "rank": i, "job": r["job"], "arm": r["arm"],
+                        **_removal(job_dir(r["job"]), r["arm"]), "cls_top1": r["cls_top1"],
+                        **{c: r[c] for c in RANKING_COLUMNS[9:]}})
+    return out
+
+
 def _write(path: Path, columns, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -176,9 +216,12 @@ def main(argv=None):
     ap.add_argument("--compare", action="append", default=[], metavar="JOB:ARM_A,ARM_B",
                     help="paired difference ARM_A - ARM_B within one job (repeatable; needs --compare-out)")
     ap.add_argument("--compare-out", type=Path, help="CSV for the --compare rows")
+    ap.add_argument("--ranking-out", type=Path, help="CSV ranking the removal arms of --out (needs --out)")
     args = ap.parse_args(argv)
     if bool(args.jobs) != bool(args.out):
         ap.error("give job directories together with --out")
+    if args.ranking_out and not args.out:
+        ap.error("--ranking-out ranks the --out CSV: give jobs and --out too")
     if bool(args.compare) != bool(args.compare_out):
         ap.error("give --compare together with --compare-out")
     if not args.out and not args.compare:
@@ -187,6 +230,10 @@ def main(argv=None):
         rows = [row for j in args.jobs for row in summarize_job(job_dir(j))]
         _write(args.out, COLUMNS, rows)
         print(f"wrote {len(rows)} arms to {args.out}")
+        if args.ranking_out:
+            ranked = ranking(args.out)
+            _write(args.ranking_out, RANKING_COLUMNS, ranked)
+            print(f"wrote {len(ranked)} ranked removal arms to {args.ranking_out}")
     if args.compare:
         rows = [compare(spec) for spec in args.compare]
         _write(args.compare_out, COMPARE_COLUMNS, rows)

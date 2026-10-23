@@ -3,8 +3,9 @@
     python -m lanes.p1.plot_fig1 [--out lanes/p1/results/fig1.png]
 
 Left: VAR top-1 vs position on the scale ladder. Single-scale arms (s0, s9 from 25893211; s1-s8 from
-25916920) at the removed scale; 2-scale windows (25916921) at the window's first scale; the three
-3-scale groups (25893212) as labelled points at the group's first scale.
+25916920) at the removed scale; 2-scale windows (25916921) and the three 3-scale groups (25893212,
+labelled points) at the mean of their removed scales ({0,1} at 0.5, {3,4,5} at 4). Under each scale
+index, its token-grid size (pn x pn, from the baseline run.json stages table).
 Right: DiT baseline / early / mid / late (25893213) as bars.
 Error bars: 95% percentile bootstrap CI of each arm's mean top-1 over its 224 images (10000 resamples,
 seed 0, as lanes/p1/summarize.py). Dashed line: the model's clean baseline.
@@ -94,6 +95,9 @@ def main(argv=None):
     if [a["params"]["scales"][0] for a in single] != list(range(10)):
         raise SystemExit(f"ERROR: single-scale arms are not s0-s9: {[a['arm'] for a in single]}")
     vbase = var_baseline(*SINGLE_JOBS, WINDOW2_JOB, WINDOW3_JOB)
+    stages = json.loads((job_dir(SINGLE_JOBS[0]) / "var" / "baseline" / "run.json").read_text())["stages"]
+    grid = {s["stage"]: s["pn"] for s in stages}
+    centre = lambda a: float(np.mean(a["params"]["scales"]))   # noqa: E731
     dit = {a["arm"]: a for a in arms(DIT_JOB)}
     dit_rows = [dit[k] for k in ("baseline", "remove_early", "remove_mid", "remove_late")]
 
@@ -106,17 +110,16 @@ def main(argv=None):
     ax.text(10.35, vbase["top1"] + 0.015, f"baseline {vbase['top1']:.3f}", color=INK2, ha="right", va="bottom",
             fontsize=9)
     _errbar(ax, [a["params"]["scales"][0] for a in single], single, BLUE, "o", "1 scale removed (at that scale)")
-    _errbar(ax, [a["params"]["scales"][0] + 0.12 for a in window2], window2, ORANGE, "s",
-            "2-scale window (at its first scale)")
-    _errbar(ax, [a["params"]["scales"][0] - 0.12 for a in window3], window3, AQUA, "D",
-            "3-scale group (at its first scale)", linestyle="none")
+    _errbar(ax, [centre(a) for a in window2], window2, ORANGE, "s", "2-scale window (at its centre)")
+    _errbar(ax, [centre(a) for a in window3], window3, AQUA, "D", "3-scale group (at its centre)",
+            linestyle="none")
     for a in window3:
         s = a["params"]["scales"]
-        ax.annotate("{" + ",".join(map(str, s)) + "}", (s[0] - 0.12, a["lo"]), textcoords="offset points",
+        ax.annotate("{" + ",".join(map(str, s)) + "}", (centre(a), a["lo"]), textcoords="offset points",
                     xytext=(0, -6), ha="center", va="top", color=INK, fontsize=9)
-    ax.set_xticks(range(10))
+    ax.set_xticks(range(10), [f"{i}\n{grid[i]}×{grid[i]}" for i in range(10)])
     ax.set_xlim(-0.5, 10.4)
-    ax.set_xlabel("VAR scale removed (window: first scale)", color=INK)
+    ax.set_xlabel("VAR scale removed (windows/groups at their centre)", color=INK)
     ax.set_ylabel("top-1 accuracy (own class)", color=INK)
     ax.set_title("VAR-d20: removing scales", color=INK, loc="left", fontsize=11, pad=26)
     ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=3, frameon=False, fontsize=9, labelcolor=INK,
