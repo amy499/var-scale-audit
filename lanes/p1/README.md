@@ -16,6 +16,8 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `summarize.py` | One row per arm: means, paired drops vs baseline with bootstrap CIs, KID; `--compare` for arm vs arm; `--ranking-out` for the ranking |
 | `plot_fig1.py` | Figure 1: VAR top-1 by removed scale / window, DiT top-1 per arm, with CIs |
 | `failure_grid.py` | Figure 1b: four fixed example images under each VAR and DiT arm |
+| `jobs/p3_both.env` | Baselines only, both models, with P3's observe hooks (P3 ride-along) |
+| `compare_p3_var.py` | Checks two P3 VAR snapshot folders are identical, file by file |
 | `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `fig1.png`, `fig1b_failures.png` (all quoted below) |
 
 ## What "removal" means
@@ -220,7 +222,7 @@ The per-row tables are at the end of the summary and in `outputs/p1/<JOBID>/<mod
 
 Options (environment, or in the `SETTINGS` file): `VAR_ARMS="NAME:S,S,S ..."`,
 `DIT_ARMS="NAME:A-B ..."`, `VAR_CUT`, `DIT_CUT`, `RUN_VAR`, `RUN_DIT`, `QUALITY`, `MANIFEST`,
-`BASELINE_REF`, `EXP_TAG`, `KEEP_RAW`.
+`BASELINE_REF`, `EXP_TAG`, `KEEP_RAW`, `P3_RIDEALONG`.
 
 **Raw tensors (`KEEP_RAW`).** Each run saves one raw output tensor per image (`*.pt`, about 170 MB per
 224-image run). Nothing downstream reads them: scoring uses the PNGs, and each tensor's `tensor_sha256`
@@ -235,6 +237,28 @@ sanity env files behave as before. With `KEEP_RAW=0` (`single_var.env`, `window2
   `outputs/p1/<JOBID>/` are deleted. PNGs, `run.json`, metrics and features are kept, and the reference
   baseline `outputs/baseline/25665469` (`BASELINE_REF`) is never touched.
 
-**P3 ride-along.** `P3_RIDEALONG=1` adds P3's observe hook (`lanes/p3/p3_observe.py:var_stages`) to the
-VAR baseline only, writing to `outputs/p1/<JOBID>/p3_var_stages`. It is an Observe hook, so the
-baseline images must still match the reference; the hash comparison checks this. DiT has no ride-along.
+**P3 ride-along (both models).** `P3_RIDEALONG=1` adds P3's observe hooks to the baselines only, never
+to a removal arm, each with its own `P3_OUT` set on that one `runner.generate` command:
+
+| Model | Hook | Output | Expected (224 images, 14 batches) |
+|---|---|---|---|
+| VAR | `lanes/p3/p3_observe.py:var_stages` | `outputs/p1/<JOBID>/p3_var_stages/var/` | 140 .npz (10 scales x 14), ~70 MB |
+| DiT | `lanes/p3/p3_observe.py:dit_stages` | `outputs/p1/<JOBID>/p3_dit_stages/dit/` | 336 .npz (24 kept steps x 14), ~90 MB |
+
+They are Observe hooks, so the baseline images must still match the reference; the hash comparison
+checks this. `summary.txt` reports each model's .npz count against the expected count (stages kept x
+batches: VAR from the baseline's stages table, DiT from the hook's own step selection). A wrong count
+or a `_failures.log` fails the job: the hook never fails the run itself, so this is where a silent loss
+shows up. A DiT count of 16 is the old call-counter bug.
+
+`jobs/p3_both.env` runs only the two baselines with both hooks (`VAR_ARMS=""`, `DIT_ARMS=""`: an empty
+list means baseline only; an unset one still takes the default), `QUALITY=0`, `KEEP_RAW=0`:
+
+```bash
+qsub -v SETTINGS=lanes/p1/jobs/p3_both.env lanes/p1/jobs/gateb.pbs
+python -m lanes.p1.compare_p3_var outputs/p1/25891860/p3_var_stages outputs/p1/<JOBID>/p3_var_stages
+```
+
+`compare_p3_var.py` (numpy only) checks the new VAR snapshots against Gate B's (job 25891860). It needs
+the same .npz names, and in each pair equal stage, class_id and seed and a bit-identical latent. It
+prints the counts and PASS or FAIL (exit 0 or 1); other fields are reported but don't decide.

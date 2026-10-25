@@ -29,14 +29,14 @@ fi
 VAR_CONFIG="${VAR_CONFIG:-configs/var_d20.yaml}"
 DIT_CONFIG="${DIT_CONFIG:-configs/dit_xl2_256.yaml}"
 MANIFEST="${MANIFEST:-manifest/frozen_v1_1.csv}"
-VAR_ARMS="${VAR_ARMS:-remove_mid:3,4,5}"
-DIT_ARMS="${DIT_ARMS:-remove_mid:84-166}"
+VAR_ARMS="${VAR_ARMS-remove_mid:3,4,5}"                 # default only when unset; "" = baseline only
+DIT_ARMS="${DIT_ARMS-remove_mid:84-166}"
 VAR_CUT="${VAR_CUT:-3}"                                 # scales per VAR arm (equal-cuts rule)
 DIT_CUT="${DIT_CUT:-83}"                                # steps per DiT arm (equal-cuts rule)
 RUN_VAR="${RUN_VAR:-1}"
 RUN_DIT="${RUN_DIT:-1}"
 QUALITY="${QUALITY:-1}"                                 # 1: classifier + Inception features (lanes/p2/quality.py)
-P3_RIDEALONG="${P3_RIDEALONG:-0}"                       # 1: P3's observe hook on the VAR baseline (never DiT)
+P3_RIDEALONG="${P3_RIDEALONG:-0}"                       # 1: P3's observe hooks on the baselines (never on an arm)
 KEEP_RAW="${KEEP_RAW:-1}"                               # 0: delete each run's *.pt once it is fully scored (see drop_raw)
 BASELINE_REF="${BASELINE_REF:-outputs/baseline/25665469}"   # jobs/baseline.pbs output the baselines must match
 EXP_TAG="${EXP_TAG:-gateb}"
@@ -242,7 +242,10 @@ var_arms() {
 
 dit_arms() {
     local spec name range a b ts
-    GEN_ENV=() GEN_OPTS=() REC_OPTS=()   # no P3 ride-along on DiT
+    GEN_ENV=() GEN_OPTS=() REC_OPTS=()
+    if [[ "$P3_RIDEALONG" == 1 ]]; then   # Observe only: images stay identical to the clean baseline
+        GEN_ENV=("P3_OUT=$OUT/p3_dit_stages") GEN_OPTS=(--hook lanes/p3/p3_observe.py:dit_stages)
+    fi
     echo; echo "== dit baseline"
     run_arm dit baseline "$DIT_CONFIG" || { echo "FAILED: dit baseline; skipping the DiT arms"; FAILED=1; return; }
     for spec in $DIT_ARMS; do
@@ -298,6 +301,31 @@ for m in var dit; do
     if [[ "${!flag}" == 1 ]]; then HASH[$m]="$(hash_check "$m")"; else HASH[$m]="not run"; fi
     [[ "${HASH[$m]}" == FAIL* ]] && FAILED=1
 done
+declare -A P3=()   # per model: P3 ride-along snapshot count vs expected (stages kept x batches)
+if [[ "$P3_RIDEALONG" == 1 ]]; then
+    batches=$(( (ROWS + BATCH - 1) / BATCH ))
+    for m in var dit; do
+        flag="RUN_${m^^}"
+        [[ "${!flag}" == 1 ]] || continue
+        d="$OUT/p3_${m}_stages"
+        if [[ "$m" == var ]]; then   # every scale of the baseline's stages table
+            kept="$(python -c "import json, sys; print(len(json.load(open(sys.argv[1]))['stages']))" \
+                "$OUT/var/baseline/run.json" 2>/dev/null)"
+        else                         # the hook's own step selection (P3_DIT_STEPS)
+            kept="$(python -c "from lanes.p3.p3_observe import _dit_step_set; print(len(_dit_step_set()))" 2>/dev/null)"
+        fi
+        n=$(find "$d" -name '*.npz' 2>/dev/null | wc -l)
+        if [[ -z "$kept" ]]; then
+            P3[$m]="FAIL $n .npz files; expected count unknown (no baseline run.json or hook not importable)"
+        elif (( n == kept * batches )); then
+            P3[$m]="OK $n .npz files (= $kept stages x $batches batches)"
+        else
+            P3[$m]="FAIL $n .npz files, expected $((kept * batches)) (= $kept stages x $batches batches)"
+        fi
+        [[ -f "$d/_failures.log" ]] && P3[$m]="FAIL ${P3[$m]#* }; $d/_failures.log exists"
+        [[ "${P3[$m]}" == FAIL* ]] && FAILED=1
+    done
+fi
 BAD="$(awk -F'\t' '$2 != 0 { printf "%s%s", sep, $1; sep = " " }' "$OUT/steps.tsv")"
 {
     echo "P1 STAGE REMOVAL ($EXP_TAG)  job $PBS_JOBID  $(date -Is)"
@@ -309,8 +337,8 @@ BAD="$(awk -F'\t' '$2 != 0 { printf "%s%s", sep, $1; sep = " " }' "$OUT/steps.ts
     echo "manifest sha256  $MANIFEST_SHA"
     echo "rows             $ROWS"
     echo "batch size       $BATCH"
-    echo "VAR arms         $([[ "$RUN_VAR" == 1 ]] && echo "$VAR_ARMS" || echo "not run")  ($VAR_CONFIG)"
-    echo "DiT arms         $([[ "$RUN_DIT" == 1 ]] && echo "$DIT_ARMS" || echo "not run")  ($DIT_CONFIG)"
+    echo "VAR arms         $([[ "$RUN_VAR" == 1 ]] && echo "${VAR_ARMS:-none (baseline only)}" || echo "not run")  ($VAR_CONFIG)"
+    echo "DiT arms         $([[ "$RUN_DIT" == 1 ]] && echo "${DIT_ARMS:-none (baseline only)}" || echo "not run")  ($DIT_CONFIG)"
     echo "quality          $QUALITY"
     echo "P3 ride-along    $P3_RIDEALONG"
     echo "keep raw (.pt)   $KEEP_RAW"
@@ -332,10 +360,12 @@ BAD="$(awk -F'\t' '$2 != 0 { printf "%s%s", sep, $1; sep = " " }' "$OUT/steps.ts
     for m in var dit; do
         printf '  %-4s -> %-8s %s\n' "$m" "${REF_DIR[$m]}" "${HASH[$m]}"
     done
-    if [[ "$P3_RIDEALONG" == 1 && "$RUN_VAR" == 1 ]]; then
+    if [[ "$P3_RIDEALONG" == 1 ]]; then
         echo
-        echo "P3 ride-along: $OUT/p3_var_stages  ($(find "$OUT/p3_var_stages" -name '*.npz' 2>/dev/null | wc -l) .npz files)"
-        [[ -f "$OUT/p3_var_stages/_failures.log" ]] && echo "  WARNING: $OUT/p3_var_stages/_failures.log exists"
+        echo "P3 ride-along (baselines only):"
+        for m in var dit; do
+            [[ -n "${P3[$m]:-}" ]] && printf '  %-4s %-28s %s\n' "$m" "$OUT/p3_${m}_stages" "${P3[$m]}"
+        done
     fi
     echo
     echo "tables: $OUT/tables  (collect exit $(step_field collect 2))"
