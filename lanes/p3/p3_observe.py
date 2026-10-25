@@ -71,7 +71,7 @@ from runner.hooks import Observe
 OUT = Path(os.environ.get("P3_OUT", "outputs/p3/stages"))
 N_DIT_STEPS = int(os.environ.get("P3_DIT_STEPS", "25"))
 
-_seen_steps = {"n": 0}      # DiT step counter: the hook sees timesteps, not indices
+_keep_cache = {}            # {total_steps: frozenset of kept step indices}
 
 
 _failures = []
@@ -122,7 +122,11 @@ def _dit_step_set(total=250, n=N_DIT_STEPS):
     return sorted(set(np.round(frac * (total - 1)).astype(int).tolist()))
 
 
-DIT_KEEP = set(_dit_step_set())
+def _keep_for(total):
+    """Kept step indices for a run of `total` steps, computed once per total."""
+    if total not in _keep_cache:
+        _keep_cache[total] = frozenset(_dit_step_set(total, N_DIT_STEPS))
+    return _keep_cache[total]
 
 
 def var_stage(model, stage, p, when, state):
@@ -137,15 +141,30 @@ def var_stage(model, stage, p, when, state):
 def dit_stage(model, stage, p, when, state):
     """DiT: save pred_xstart (the current guess at the finished image) at kept steps.
 
-    `stage` is the timestep (999..0), not the step index, so the index is counted here.
+    `stage` is the TIMESTEP (999..0), not the step index, so the index comes from
+    `state.fields["step"]`, which the runner computes per step in `dit_model.plan()`.
+
+    DO NOT COUNT CALLS TO GET THE INDEX. A module-level counter is not reset between
+    batches, so on a 224-image run (14 batches x 250 steps) it reaches 250..3499 after the
+    first batch and matches nothing in the kept set — only the first 16 images are saved,
+    silently. That bug shipped and cost a DiT run; P1 caught it. `fields["step"]` restarts
+    at 0 for every batch because it is a property of the schedule, not of the hook.
+
+    The total step count is derived from p = step / (total - 1) rather than assumed, so a
+    run with a different schedule still saves the right spread instead of saving nothing.
     """
-    idx = _seen_steps["n"]
-    _seen_steps["n"] += 1
-    if idx not in DIT_KEEP:
-        return
+    j = int(state.fields["step"])
+    if j > 0:
+        if p <= 0:
+            return                              # inconsistent fields; skip rather than guess
+        total = int(round(j / p)) + 1
+        if j not in _keep_for(total):
+            return
+    # j == 0 is always kept: it is the first step, and `total` cannot be derived from p = 0
+
     x0 = state.pred_xstart.detach().float().cpu().numpy()
     _save("dit", stage, state.rows, x0,
-          extra={"p": np.float32(p), "step_index": np.int32(idx),
+          extra={"p": np.float32(p), "step_index": np.int32(j),
                  "alpha_bar_in": np.float32(state.fields.get("alpha_bar_in", float("nan")))})
 
 
