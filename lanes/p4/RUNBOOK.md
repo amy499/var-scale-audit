@@ -5,7 +5,7 @@ Owner: P4. Two halves, and the split matters:
 | Half | Where | Status |
 |---|---|---|
 | Progress mapping, bands, plot template, Figure 5 frame, arm construction, the VAR hook | **Your laptop, CPU** | Built and verified |
-| The Gate B pilot itself (real VAR-d20 and DiT-XL/2 images) | **NSCC GPU** (PBS, §B) or **TC2 GPU** (SLURM, §B′) | Jobs written, **not yet submitted** |
+| The Gate B pilot itself (real VAR-d20 and DiT-XL/2 images) | **NSCC GPU** (PBS, §B) or **TC2 GPU** (SLURM, §B′) | Smoke + both pilots ran 22–23 Oct (jobs 25915819/20/21), 10 runs each, 224/224 paired. P3-metric numbers (§B4 step 2–3) **not yet computed** |
 
 **No result ever comes from a CPU run.** The CPU checks prove the mechanics — that the hook removes
 exactly what it claims, that every arm stays paired, that the bands are what the document says. The
@@ -174,18 +174,50 @@ that number, never from VAR's.
 
 ### B4. Numbers and the figure
 
+Run on NSCC, from the repo root, in the `var-dit` env. `<V>` and `<D>` are the pilot job directories
+(`outputs/p4/pilot_var/<JOBID>`, `outputs/p4/pilot_dit/<JOBID>`). The pilot jobs already run the pairing
+check at the end; do it again here so the result is on your terminal.
+
 ```bash
-python lanes/p4/verify_pairing.py outputs/p4/pilot_var/<JOBID>    # 16/16 per arm
-python -m lanes.p4.metric_placeholder --pilot outputs/p4/pilot_var/<JOBID>
-python -m lanes.p4.metric_placeholder --pilot outputs/p4/pilot_dit/<JOBID>
-python -m lanes.p4.figure4_draft outputs/p4/pilot_var/<JOBID> outputs/p4/pilot_dit/<JOBID> \
-    --out outputs/p4/figure4_draft.png
+# 1. Pairing: every arm 224/224 rows paired (the frozen manifest has 224 rows, not 16)
+python lanes/p4/verify_pairing.py <V>
+python lanes/p4/verify_pairing.py <D>
+
+# 2. P3's metrics. Classifier first: it writes cls_prob and inception_features.npz, which
+#    p3_metrics reads. Needs the classifier weights, downloaded once on the login node:
+#    python -m lanes.p2.quality --download
+for R in <V> <D>; do
+    for A in $R/*/; do                       # baseline and the nine arms; qsub this, it is GPU work
+        python -m lanes.p2.quality "$A"
+        python -m lanes.p3.p3_metrics fidelity "$A" --baseline $R/baseline
+    done
+done
+
+# 3. Figure 4 on P3's fidelity metric (incep_cos); re-run with --metric cls_prob for validity
+python -m lanes.p4.figure4_draft <V> <D> --metric incep_cos --out outputs/p4/figure4_incep_cos.png
+python -m lanes.p4.figure4_draft <V> <D> --metric cls_prob  --out outputs/p4/figure4_cls_prob.png
+
+# 4. The placeholder, kept as a plumbing control only
+python -m lanes.p4.metric_placeholder --pilot <V>
+python -m lanes.p4.metric_placeholder --pilot <D>
+python -m lanes.p4.figure4_draft <V> <D> --out outputs/p4/figure4_draft.png
+
 git log -1 --oneline        # record this beside the results; run.json has the submodules, not the branch
 ```
 
-The metric is a **placeholder** — distance from each arm's image to its paired baseline image. It
-shows the plumbing works. P3's calibrated quality metrics replace it through the same contract, with
-no change to the figure code.
+**One metric does not measure recovery** (`lanes/p3/README.md`): `incep_cos` says whether an image is
+still the *same* image, `cls_prob` says whether it is still a valid image of its class. A re-routed
+image scores badly on the first and well on the second, and is not damage. Report both, never one.
+A fidelity/validity reading needs both figures side by side.
+
+The placeholder (`p4_placeholder_rel_l2`) is distance on the raw tensor. It proves the plumbing and
+nothing else; P3's metrics are the ones for the report. `figure4_draft.py` knows the direction of
+`incep_cos` (lower = closer to baseline) and `cls_prob` (higher = better) and labels the axis from it.
+Any other `--metric` is drawn as higher-is-better, so add a `MetricSpec` first.
+
+**Not yet in this runbook, on purpose:** P3's newer stage tools on `main` (`stage_curves.py`,
+`semantic_curve.py`, `agreement.py`, `baseline_audit.py`, `RANKING_SPEC.md`) work on P3's own observed
+runs, not on P4's arm directories. Figure 5 will consume their rankings; nothing in B4 does.
 
 ---
 
@@ -324,16 +356,7 @@ Anything else means do not use those runs.
 
 ### B′6. Numbers and the figure
 
-Same as section B4, using the TC2 output paths:
-
-```bash
-python lanes/p4/verify_pairing.py outputs/p4/pilot_var/<JOBID>
-python -m lanes.p4.metric_placeholder --pilot outputs/p4/pilot_var/<JOBID>
-python -m lanes.p4.metric_placeholder --pilot outputs/p4/pilot_dit/<JOBID>
-python -m lanes.p4.figure4_draft outputs/p4/pilot_var/<JOBID> outputs/p4/pilot_dit/<JOBID> \
-    --out outputs/p4/figure4_draft.png
-git log -1 --oneline
-```
+Same as section B4 (pairing, P3 metrics, Figure 4, `git log -1 --oneline`), using the TC2 output paths.
 
 ### B′7. Monitoring and troubleshooting (TC2 / SLURM)
 

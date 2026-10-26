@@ -36,6 +36,16 @@ from lanes.p4.verify_pairing import find_runs  # noqa: E402
 
 VAR_NO_SAVING = "VAR: no compute saving - the intervention runs after the transformer pass"
 
+# P3's metrics as written to metrics.csv by lanes.p3.p3_metrics and lanes.p2.quality
+# (lanes/p3/README.md "the metric set"). Without these, an unknown --metric would be drawn as
+# higher-is-better, which is backwards for incep_cos, a distance to the paired baseline image.
+P3_METRIC_SPECS = {
+    "incep_cos": plotting.MetricSpec("incep_cos", "lower_is_better", "per_image",
+                                     "fidelity: Inception cosine distance to baseline"),
+    "cls_prob": plotting.MetricSpec("cls_prob", "higher_is_better", "per_image",
+                                    "validity: classifier probability of the class"),
+}
+
 
 def _metric_values(run_dir: Path, metric: str) -> list[float]:
     path = run_dir / "metrics.csv"
@@ -128,8 +138,8 @@ def figure4(pilot_roots, out_path, *, metric: str = "p4_placeholder_rel_l2", bac
             metric_spec=None) -> Path:
     if metric_spec is None:
         from lanes.p4.metric_placeholder import metric_specs
-        metric_spec = next((s for s in metric_specs() if s.name == metric),
-                           plotting.MetricSpec(metric))
+        known = {s.name: s for s in metric_specs()} | P3_METRIC_SPECS
+        metric_spec = known.get(metric, plotting.MetricSpec(metric))
     collected = [collect(Path(root), metric) for root in pilot_roots]
     spec = figure4_spec(collected, metric_spec)
     size = (520 * len(collected) + 140, 460)
