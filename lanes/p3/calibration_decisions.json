@@ -1,7 +1,7 @@
 {
   "owner": "P3",
-  "images": "sample photos",
-  "n_images": 5,
+  "images": "/mnt/user-data/uploads/var-scale-audit/for_darien_20_clean_pngs",
+  "n_images": 20,
   "thresholds": {
     "monotonicity": 0.9,
     "direction": 1.0,
@@ -14,7 +14,7 @@
       "tokens": 1,
       "cum_pct": 0.15,
       "spec_centroid": NaN,
-      "grad_energy": 2.97239233024e-17,
+      "grad_energy": 3.430303260079145e-17,
       "hf_ratio": NaN
     },
     {
@@ -22,81 +22,81 @@
       "grid": "2x2",
       "tokens": 4,
       "cum_pct": 0.74,
-      "spec_centroid": 0.015675824001465145,
-      "grad_energy": 0.001058642371299687,
-      "hf_ratio": 4.38790928739029e-09
+      "spec_centroid": 0.01567630389631908,
+      "grad_energy": 0.0010299718027504006,
+      "hf_ratio": 4.3231218263568455e-09
     },
     {
       "si": 2,
       "grid": "3x3",
       "tokens": 9,
       "cum_pct": 2.06,
-      "spec_centroid": 0.015702763776501823,
-      "grad_energy": 0.001714805987945244,
-      "hf_ratio": 3.956175548184957e-09
+      "spec_centroid": 0.015666942037029084,
+      "grad_energy": 0.002263761676411537,
+      "hf_ratio": 2.2237666091500732e-09
     },
     {
       "si": 3,
       "grid": "4x4",
       "tokens": 16,
       "cum_pct": 4.41,
-      "spec_centroid": 0.015672483980445576,
-      "grad_energy": 0.002274116483777196,
-      "hf_ratio": 6.236808100220232e-09
+      "spec_centroid": 0.015678288343642377,
+      "grad_energy": 0.0030964745856243993,
+      "hf_ratio": 7.076345128980356e-09
     },
     {
       "si": 4,
       "grid": "5x5",
       "tokens": 25,
       "cum_pct": 8.09,
-      "spec_centroid": 0.01587302260345068,
-      "grad_energy": 0.002752231842446974,
-      "hf_ratio": 1.0892128385428815e-08
+      "spec_centroid": 0.015966934554339868,
+      "grad_energy": 0.0039353088934231464,
+      "hf_ratio": 1.1616330110647203e-08
     },
     {
       "si": 5,
       "grid": "6x6",
       "tokens": 36,
       "cum_pct": 13.38,
-      "spec_centroid": 0.016212205964042107,
-      "grad_energy": 0.0033017608775590137,
-      "hf_ratio": 2.0153824219571116e-08
+      "spec_centroid": 0.016331253417656795,
+      "grad_energy": 0.00474998032781895,
+      "hf_ratio": 1.878372156631553e-08
     },
     {
       "si": 6,
       "grid": "8x8",
       "tokens": 64,
       "cum_pct": 22.79,
-      "spec_centroid": 0.017852145106299906,
-      "grad_energy": 0.004467734833173149,
-      "hf_ratio": 5.7893339475265865e-08
+      "spec_centroid": 0.017762233312139306,
+      "grad_energy": 0.006117213836733161,
+      "hf_ratio": 5.229500487917338e-08
     },
     {
       "si": 7,
       "grid": "10x10",
       "tokens": 100,
       "cum_pct": 37.5,
-      "spec_centroid": 0.018381756910292663,
-      "grad_energy": 0.005263227612952265,
-      "hf_ratio": 1.0357556785791129e-07
+      "spec_centroid": 0.019168554487198876,
+      "grad_energy": 0.007202866253081137,
+      "hf_ratio": 1.4130965132862487e-07
     },
     {
       "si": 8,
       "grid": "13x13",
       "tokens": 169,
       "cum_pct": 62.35,
-      "spec_centroid": 0.0218858238104342,
-      "grad_energy": 0.006854811904679648,
-      "hf_ratio": 4.784680508971507e-07
+      "spec_centroid": 0.021250296871601636,
+      "grad_energy": 0.008683211464283136,
+      "hf_ratio": 2.86517162578255e-07
     },
     {
       "si": 9,
       "grid": "16x16",
       "tokens": 256,
       "cum_pct": 100.0,
-      "spec_centroid": 0.022648772657136114,
-      "grad_energy": 0.007855481604938715,
-      "hf_ratio": 1.4398568553258627e-06
+      "spec_centroid": 0.02314087365905666,
+      "grad_energy": 0.009896168431479429,
+      "hf_ratio": 9.501347073259705e-07
     }
   ],
   "results": [
@@ -106,7 +106,7 @@
       "expected": -1,
       "rho": -1.0,
       "direction": 1.0,
-      "sensitivity": 0.1787,
+      "sensitivity": 0.1724,
       "verdict": "PASS"
     },
     {
@@ -115,7 +115,7 @@
       "expected": -1,
       "rho": -1.0,
       "direction": 1.0,
-      "sensitivity": 0.1555,
+      "sensitivity": 0.148,
       "verdict": "PASS"
     },
     {
@@ -124,7 +124,7 @@
       "expected": -1,
       "rho": -1.0,
       "direction": 1.0,
-      "sensitivity": 0.4263,
+      "sensitivity": 0.4432,
       "verdict": "PASS"
     },
     {
@@ -133,7 +133,7 @@
       "expected": 1,
       "rho": 1.0,
       "direction": 1.0,
-      "sensitivity": 0.0066,
+      "sensitivity": 0.0103,
       "verdict": "WEAK (insensitive)"
     },
     {
@@ -142,7 +142,7 @@
       "expected": 1,
       "rho": 1.0,
       "direction": 1.0,
-      "sensitivity": 0.0497,
+      "sensitivity": 0.0389,
       "verdict": "PASS"
     },
     {
@@ -151,7 +151,7 @@
       "expected": 1,
       "rho": 1.0,
       "direction": 1.0,
-      "sensitivity": 0.0204,
+      "sensitivity": 0.0343,
       "verdict": "PASS"
     },
     {
@@ -160,7 +160,7 @@
       "expected": -1,
       "rho": -1.0,
       "direction": 1.0,
-      "sensitivity": 0.2855,
+      "sensitivity": 0.2736,
       "verdict": "PASS"
     },
     {
@@ -169,7 +169,7 @@
       "expected": -1,
       "rho": -1.0,
       "direction": 1.0,
-      "sensitivity": 0.2291,
+      "sensitivity": 0.2493,
       "verdict": "PASS"
     },
     {
@@ -178,7 +178,7 @@
       "expected": -1,
       "rho": -1.0,
       "direction": 1.0,
-      "sensitivity": 0.7239,
+      "sensitivity": 0.7693,
       "verdict": "PASS"
     }
   ],

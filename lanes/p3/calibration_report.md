@@ -1,7 +1,7 @@
 # P3 Metric Calibration Report
 
 **AI6132 Group 17 — VAR vs DiT stage audit**
-Owner: P3 (information/semantics lane) · 1 Oct 2026, addendum 20 Oct 2026
+Owner: P3 (information/semantics lane) · 1 Oct 2026, addenda 20 and 23 Oct 2026
 
 Reproduce with `python -m lanes.p3.calibrate_metrics` (no model checkpoints needed).
 
@@ -136,6 +136,100 @@ Two observations with consequences for this lane:
   stage metrics on *final* baseline images from both models — a systematic offset there is a
   per-model signature that must be normalised out before any cross-model frequency claim.
 
+---
+## Addendum, 23 Oct 2026 — re-run on real VAR baselines
+
+The 1 Oct run and the 20 Oct ladder both used **five natural photographs** as stand-ins,
+because no model output existed yet. P1 has since supplied **20 clean VAR-d20 baseline
+PNGs** from the frozen manifest (7 classes, 2–3 images each). The harness was re-run on
+those.
+
+`calibration_decisions.json` and `calibration_curves.png` in this folder are now **that**
+run. The tables in *Results* and in finding 5 above are the earlier stand-in run, kept for
+comparison.
+
+Reproduce with:
+
+```
+python -m lanes.p3.calibrate_metrics --baseline-dir for_darien_20_clean_pngs --n-images 20
+```
+
+### 9. The degradation sweep reproduces on real model output
+
+Only the three metrics that survived 1 Oct were swept.
+
+| Degradation | Metric | Expected | ρ | Direction | Sensitivity | Verdict |
+|---|---|---|---|---|---|---|
+| blur | spec_centroid | down | −1.000 | 100% | 17.2% | PASS |
+| blur | grad_energy | down | −1.000 | 100% | 14.8% | PASS |
+| blur | hf_ratio | down | −1.000 | 100% | 44.3% | PASS |
+| noise | spec_centroid | up | +1.000 | 100% | 1.0% | WEAK |
+| noise | grad_energy | up | +1.000 | 100% | 3.9% | PASS |
+| noise | hf_ratio | up | +1.000 | 100% | 3.4% | PASS |
+| downsample | spec_centroid | down | −1.000 | 100% | 27.4% | PASS |
+| downsample | grad_energy | down | −1.000 | 100% | 24.9% | PASS |
+| downsample | hf_ratio | down | −1.000 | 100% | 76.9% | PASS |
+
+**Every direction and every ρ reproduces exactly.** The only verdict that moves is
+noise/`spec_centroid`, and it was WEAK on both runs (0.7% then, 1.0% now), so no decision
+changes. Calibrating on stand-in photographs did not mislead us — worth saying explicitly,
+because it was a real risk.
+
+### 10. The VAR scale ladder, measured on real baselines
+
+Same construction as finding 5 — the baselines downsampled to VAR-d20's own grids, giving
+the **best case** at each scale, an upper bound on what the model could have committed:
+
+| si | grid | tokens | cum % | spec_centroid | grad_energy | hf_ratio |
+|---|---|---|---|---|---|---|
+| 0 | 1×1 | 1 | 0.15% | NaN | 3.4e−17 | NaN |
+| 1 | 2×2 | 4 | 0.74% | 0.015676 | 0.001030 | 4.3e−09 |
+| 2 | 3×3 | 9 | 2.06% | 0.015667 | 0.002264 | 2.2e−09 |
+| 3 | 4×4 | 16 | 4.41% | 0.015678 | 0.003096 | 7.1e−09 |
+| 4 | 5×5 | 25 | 8.09% | 0.015967 | 0.003935 | 1.2e−08 |
+| 5 | 6×6 | 36 | 13.38% | 0.016331 | 0.004750 | 1.9e−08 |
+| 6 | 8×8 | 64 | 22.79% | 0.017762 | 0.006117 | 5.2e−08 |
+| 7 | 10×10 | 100 | 37.50% | 0.019169 | 0.007203 | 1.4e−07 |
+| 8 | 13×13 | 169 | 62.35% | 0.021250 | 0.008683 | 2.9e−07 |
+| 9 | 16×16 | 256 | 100% | 0.023141 | 0.009896 | 9.5e−07 |
+| — | **full 256** | 680 | 100% | **0.070011** | **0.035407** | **0.045089** |
+
+Three things changed against the stand-in ladder, none of them in a way that rescues a
+metric:
+
+- **`hf_ratio` is no longer identically zero** — it now reads 1e−09 to 1e−06 across the
+  ladder. That is still zero for every practical purpose: four to five orders of magnitude
+  below the full-resolution 0.045089. The finding stands.
+- **`spec_centroid` moves 0.0157 → 0.0231** across si 1–9, against 0.0700 at full
+  resolution. It covers about a third of its range on the whole ladder.
+- **`grad_energy` covers 0.00103 → 0.00990, a 9.6× range** — still the only pixel metric
+  with usable range on VAR's scales.
+
+**si 0 returns NaN for `spec_centroid` and `hf_ratio`.** That is the flat-image guard from
+finding 7 firing on real data exactly as predicted, rather than inventing a plausible
+number. `grad_energy` at si 0 is 3.4e−17, numerically zero.
+
+**The consequence for every lane is unchanged and now measured rather than estimated: a
+flat line across VAR's early band is a floor effect, not a finding.**
+
+### 11. VAR's half of the per-model signature is now measured
+
+Finding 8 called for the stage metrics on *final* baseline images from both models, to
+expose a systematic per-model offset before any cross-model frequency claim. VAR's half is
+the **full 256** row above:
+
+| | spec_centroid | grad_energy | hf_ratio |
+|---|---|---|---|
+| **VAR** finals (n=20) | 0.070011 | 0.035407 | 0.045089 |
+| **DiT** finals | — | — | — |
+
+**DiT's half is still missing** — there are no DiT baselines on disk. Until P1 supplies
+them, the offset cannot be measured, so no cross-model frequency claim can be normalised
+and Figure 3 cannot carry both models on a shared pixel-metric axis. This is missing data,
+not a missing tool.
+
+---
+
 ## Decisions
 
 | Metric | Status | Use |
@@ -147,6 +241,10 @@ Two observations with consequences for this lane:
 | `lap_var` | **LATE STAGES ONLY** | saturates by blur σ=2 |
 | `lf_ratio` | **DEMOTED** | near-blind to noise (0.1%) |
 | `pixel_entropy` | **DROPPED** | fails direction and sensitivity |
+
+**Unchanged by the 23 Oct re-run on real VAR baselines.** Every direction and ρ
+reproduced; the only verdict that moved was noise/`spec_centroid`, already WEAK on both
+runs.
 
 **Store the full 64-bin radial profile per stage**, not only the scalars: it lets the bands
 be re-cut later without re-running the GPU sweep.
