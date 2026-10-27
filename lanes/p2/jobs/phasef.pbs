@@ -1,0 +1,42 @@
+#!/bin/bash
+#PBS -N p2_phasef
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o outputs/p2/pbs/
+# P2 Phase F (optional): DiT on real DIBaS images (lanes/p2/transfer.py). VAE reconstruction check, then
+# for each starting timestep: the real latent, noised to that timestep, denoised by DiT-XL/2 (cfg 1).
+#     qsub -P <your-project-id> -v REAL_DIR=data/dibas_subset lanes/p2/jobs/phasef.pbs
+# REAL_DIR: a folder of images (a multiple of 16; e.g. 2 per DIBaS species), prepared on the login node.
+set -uo pipefail
+[[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
+cd "$PBS_O_WORKDIR"
+[[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
+[[ -d "${REAL_DIR:-}" ]] || { echo "set REAL_DIR to a folder of images" >&2; exit 1; }
+
+STARTS="${STARTS:-36 96 197 297 497 798}"   # DiT timesteps to start from (timestep_in values)
+OUT="outputs/p2/phasef/${PBS_JOBID%%.*}"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 P2_REAL_DIR="$REAL_DIR" P2_REAL_MANIFEST="$OUT/manifest.csv"
+FAILED=0
+
+python -m lanes.p2.transfer manifest "$REAL_DIR" --out "$OUT/manifest.csv" \
+    && python -m lanes.p2.transfer recon "$REAL_DIR" --out "$OUT/recon" || exit 1
+for t in $STARTS; do
+    echo "== start at timestep $t"
+    P2_STAGE="$t" python -m runner.generate --config lanes/p2/jobs/dit_cfg1.yaml --manifest "$OUT/manifest.csv" \
+        --batch-size 16 --out-dir "$OUT/t$t" --hook lanes/p2/transfer.py:real_x \
+        && python -m lanes.p2.transfer score "$OUT/t$t" --real-dir "$REAL_DIR" --manifest "$OUT/manifest.csv" \
+        || { echo "FAILED: t$t"; FAILED=1; }
+done
+echo "code: $(git rev-parse --abbrev-ref HEAD) $(git log -1 --oneline)"
+if [[ "$FAILED" == 0 ]]; then echo "PHASE F DONE"; else echo "PHASE F FAILED: see above"; fi
+exit "$FAILED"
