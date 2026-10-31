@@ -189,7 +189,7 @@ python lanes/p4/verify_pairing.py <D>
 for R in <V> <D>; do
     for A in $R/*/; do                       # baseline and the nine arms; qsub this, it is GPU work
         python -m lanes.p2.quality "$A"
-        python -m lanes.p3.p3_metrics fidelity "$A" --baseline $R/baseline
+        python -m lanes.p4.p3_fidelity "$A" --baseline $R/baseline   # see the note below
     done
 done
 
@@ -204,6 +204,13 @@ python -m lanes.p4.figure4_draft <V> <D> --out outputs/p4/figure4_draft.png
 
 git log -1 --oneline        # record this beside the results; run.json has the submodules, not the branch
 ```
+
+**Why `lanes.p4.p3_fidelity` and not `lanes.p3.p3_metrics fidelity`:** on 31 Oct the P3 command crashed
+with `ValueError: invalid literal for int() with base 10: ''`. P3 writes `"stage": ""`; P2's
+`append_metrics` (`lanes/p2/schema.py`) takes a number or None. The wrapper calls P3's
+`fidelity_incep` unchanged and passes `stage=None`. Neither lane was edited; tell P3, and delete the
+wrapper once it is fixed. In an interactive job, activate the env first (`module load miniforge3`,
+`eval "$(conda shell.bash hook)"`, `conda activate var-dit`, `export HF_HUB_OFFLINE=1`).
 
 **One metric does not measure recovery** (`lanes/p3/README.md`): `incep_cos` says whether an image is
 still the *same* image, `cls_prob` says whether it is still a valid image of its class. A re-routed
