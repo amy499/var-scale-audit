@@ -33,6 +33,7 @@ DIT_SEVERITIES="${DIT_SEVERITIES:-$SEVERITIES}"
 RUN_VAR="${RUN_VAR:-1}"
 RUN_DIT="${RUN_DIT:-1}"
 QUALITY="${QUALITY:-1}"                                 # 1: classifier + Inception features (lanes/p2/quality.py)
+KEEP_RAW="${KEEP_RAW:-0}"                               # 1: keep each image's raw .pt tensor (~0.8 MB each)
 EXP_TAG="${EXP_TAG:-pilot}"
 JOB="${PBS_JOBID%%.*}"
 OUT="${OUT_ROOT:-outputs/p2}/$EXP_TAG/$JOB"
@@ -81,23 +82,30 @@ quality() {   # quality <run-dir>: classifier scores + Inception features, if QU
     [[ "$QUALITY" != 1 ]] || python -m lanes.p2.quality "$1"
 }
 
+drop_raw() {   # drop_raw <run-dir>: delete the raw .pt tensors once a run is scored, unless KEEP_RAW=1.
+    # P2's analysis reads the PNGs and inception_features.npz; each tensor's sha256 stays in run.json.
+    # At ~0.8 MB per image they fill the 50 GB home quota (Phase C, 21 Oct).
+    [[ "$KEEP_RAW" == 1 ]] || find "$1" -maxdepth 1 -name '*.pt' -delete
+}
+
 sweep() {   # sweep <model> <config> <hook> <trace-every> "<stages>" "<severities>": baseline, then stage x severity
     local model="$1" config="$2" hook="$3" stages="$5" sevs="$6" root="$OUT/$1" exp="${1}_${EXP_TAG}_$JOB" arm
     export P2_TRACE_EVERY="$4"
     echo "== $model baseline"
     P2_TRACE_DIR="$root/trace" generate "$root/baseline" "$config" save_states \
-        && record "$root/baseline" "$exp" baseline && quality "$root/baseline" \
+        && record "$root/baseline" "$exp" baseline && quality "$root/baseline" && drop_raw "$root/baseline" \
         || { echo "FAILED: $model baseline"; FAILED=1; return; }
     for s in $stages; do
         for sev in $sevs; do
-            arm="${hook}_s${s}_sev${sev}"
+            arm="${hook}_s${s//,/+}_sev${sev}${P2_SCALE:+_${P2_SCALE}}"   # "3,6" (two stages) -> s3+6
             echo "== $model $arm"
             P2_STAGE="$s" P2_SEVERITY="$sev" P2_TRACE_REF="$root/trace" P2_METRICS="$root/$arm/metrics.csv" \
                 generate "$root/$arm" "$config" "$hook" compare_states \
                 && record "$root/$arm" "$exp" "$arm" --baseline "$root/baseline" \
-                       --param hook="$hook" --param stage="$s" --param severity="$sev" --param scale=rel \
+                       --param hook="$hook" --param stage="$s" --param severity="$sev" --param scale="${P2_SCALE:-rel}" \
+                       --param noise_seed="${P2_NOISE_SEED:-0}" \
                 && python -m lanes.p2.analyze images "$root/$arm" --baseline "$root/baseline" \
-                && quality "$root/$arm" \
+                && quality "$root/$arm" && drop_raw "$root/$arm" \
                 || { echo "FAILED: $model $arm"; FAILED=1; }
         done
     done
@@ -106,7 +114,9 @@ sweep() {   # sweep <model> <config> <hook> <trace-every> "<stages>" "<severitie
 [[ "$RUN_VAR" == 1 ]] && sweep var "$VAR_CONFIG" "$VAR_HOOK" 1 "$VAR_STAGES" "$SEVERITIES"
 [[ "$RUN_DIT" == 1 ]] && sweep dit "$DIT_CONFIG" noise_x 25 "$DIT_STAGES" "$DIT_SEVERITIES"
 
-python -m lanes.p2.schema collect "$OUT" --out "$OUT/tables" && python -m lanes.p2.analyze summary "$OUT/tables" || FAILED=1
+python -m lanes.p2.schema collect "$OUT" --out "$OUT/tables" && python -m lanes.p2.analyze summary "$OUT/tables" \
+    && { [[ "$QUALITY" != 1 ]] || { python -m lanes.p2.analyze baselines "$OUT/tables" \
+         && python -m lanes.p2.analyze summary "$OUT/tables" --exclude-broken-baselines; }; } || FAILED=1
 echo "code: $(git rev-parse --abbrev-ref HEAD) $(git log -1 --oneline)"
 if [[ "$FAILED" == 0 ]]; then echo "PILOT DONE: all runs recorded and paired"; else echo "PILOT FAILED: see above"; fi
 exit "$FAILED"

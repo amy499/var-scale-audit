@@ -13,6 +13,10 @@ Corruption (Modify). Gaussian noise is added to one tensor at the stages in P2_S
     P2_SEVERITY  required  noise strength s >= 0
     P2_SCALE     rel (default): noise std = s x that image's std of the tensor, the same rule for both models
                  abs: noise std = s
+                 sigma (DiT only): noise std = s x the noise level sigma of the corrupted latent (the step's
+                   sigma_out). "rel" adds the same fraction of signal at every step, which is a small change
+                   early (the latent is still mostly noise) and a large one late; "sigma" adds the same
+                   fraction of the noise the model expects at that step, so steps are compared fairly.
     P2_NOISE_SEED  default 0; a different value gives a different, independent noise draw
 
 The noise for an image depends only on (class_id, seed, stage, tensor, P2_NOISE_SEED): not on the batch
@@ -79,6 +83,11 @@ def _add_noise(field: str, severity: float, scale: str, noise_seed: int):
         amp = severity
         if scale == "rel":   # per image, so it does not depend on the rest of the batch
             amp = severity * t.float().flatten(1).std(dim=1).to(t.dtype).view(-1, *[1] * (t.dim() - 1))
+        elif scale == "sigma":
+            sigma = state.fields.get("sigma_out")
+            if sigma is None:
+                raise RuntimeError(f"P2_SCALE=sigma needs a noise level; a {model} state has none (DiT only)")
+            amp = severity * float(sigma)
         return dataclasses.replace(state, **{field: t + amp * noise_like(t, state.rows, stage, field, noise_seed)})
     return corrupt
 
@@ -92,8 +101,8 @@ def _corruption(name: str) -> Modify:
     severity = _env("P2_SEVERITY", float)
     scale = _env("P2_SCALE", default="rel")
     noise_seed = _env("P2_NOISE_SEED", int, default=0)
-    if severity < 0 or scale not in ("rel", "abs"):
-        raise RuntimeError(f"P2_SEVERITY must be >= 0 and P2_SCALE rel or abs; got {severity}, {scale!r}")
+    if severity < 0 or scale not in ("rel", "abs", "sigma"):
+        raise RuntimeError(f"P2_SEVERITY must be >= 0 and P2_SCALE rel, abs or sigma; got {severity}, {scale!r}")
     label = f"p2_{name}_s{'+'.join(map(str, stages))}_sev{severity:g}_{scale}" + (f"_n{noise_seed}" if noise_seed else "")
     return Modify(_add_noise(field, severity, scale, noise_seed), when=when, stages=stages, name=label)
 

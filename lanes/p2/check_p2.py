@@ -223,7 +223,7 @@ def check_pilot_job(var_cfg, work):
     check("pilot.pbs on CPU (tiny VAR) with a SETTINGS file: baseline and one corruption run, recorded, paired, merged",
           p.returncode == 0 and "PILOT DONE" in p.stdout and len(runs) == 2 and arm.get("pairing_ok") == "True"
           and arm.get("experiment") == "var_checktag_cpucheck"
-          and json.loads(arm.get("params", "{}")) == {"hook": "noise_h", "stage": 3, "severity": 0.5, "scale": "rel"}
+          and json.loads(arm.get("params", "{}")) == {"hook": "noise_h", "stage": 3, "severity": 0.5, "scale": "rel", "noise_seed": 0}
           and n_metrics > 16 and len(summary) == 1,
           {"exit": p.returncode, "tail": (p.stdout + p.stderr)[-600:]})
     if with_quality:
