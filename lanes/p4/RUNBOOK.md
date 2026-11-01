@@ -5,7 +5,7 @@ Owner: P4. Two halves, and the split matters:
 | Half | Where | Status |
 |---|---|---|
 | Progress mapping, bands, plot template, Figure 5 frame, arm construction, the VAR hook | **Your laptop, CPU** | Built and verified |
-| The Gate B pilot itself (real VAR-d20 and DiT-XL/2 images) | **NSCC GPU** (PBS, §B) or **TC2 GPU** (SLURM, §B′) | Smoke + both pilots ran 22–23 Oct (jobs 25915819/20/21), 10 runs each, 224/224 paired. P3-metric numbers (§B4 step 2–3) **not yet computed** |
+| The Gate B pilot itself (real VAR-d20 and DiT-XL/2 images) | **NSCC GPU** (PBS, §B) or **TC2 GPU** (SLURM, §B′) | Smoke + both pilots ran 22–23 Oct (jobs 25915819/20/21), 10 runs each, 224/224 paired. Rerun as VAR 25969141 / DiT 25969145, also paired. P3's `incep_cos` and `cls_prob` were scored on NSCC for all 20 runs (kept under `outputs/`, not in git). **Figure 4 from those metrics not yet rendered**; the only figure so far is the placeholder one |
 
 **No result ever comes from a CPU run.** The CPU checks prove the mechanics — that the hook removes
 exactly what it claims, that every arm stays paired, that the bands are what the document says. The
