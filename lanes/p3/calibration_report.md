@@ -1,7 +1,7 @@
 # P3 Metric Calibration Report
 
 **AI6132 Group 17 — VAR vs DiT stage audit**
-Owner: P3 (information/semantics lane) · 1 Oct 2026, addenda 20 and 23 Oct 2026
+Owner: P3 (information/semantics lane) · 1 Oct 2026, addenda 20 and 23 Oct 2026; DiT row 2 Nov 2026
 
 Reproduce with `python -m lanes.p3.calibrate_metrics` (no model checkpoints needed).
 
@@ -212,7 +212,7 @@ number. `grad_energy` at si 0 is 3.4e−17, numerically zero.
 **The consequence for every lane is unchanged and now measured rather than estimated: a
 flat line across VAR's early band is a floor effect, not a finding.**
 
-### 11. VAR's half of the per-model signature is now measured
+### 11. The per-model signature, VAR and DiT — no detectable offset
 
 Finding 8 called for the stage metrics on *final* baseline images from both models, to
 expose a systematic per-model offset before any cross-model frequency claim. VAR's half is
@@ -221,12 +221,23 @@ the **full 256** row above:
 | | spec_centroid | grad_energy | hf_ratio |
 |---|---|---|---|
 | **VAR** finals (n=20) | 0.070011 | 0.035407 | 0.045089 |
-| **DiT** finals | — | — | — |
+| **DiT** finals (n=20) | 0.075864 | 0.041008 | 0.046955 |
 
-**DiT's half is still missing** — there are no DiT baselines on disk. Until P1 supplies
-them, the offset cannot be measured, so no cross-model frequency claim can be normalised
-and Figure 3 cannot carry both models on a shared pixel-metric axis. This is missing data,
-not a missing tool.
+**DiT's half was measured on 2 Nov 2026, on P1's 20 DiT baselines, paired by class and seed
+with the VAR set.** DiT − VAR, mean of the paired differences with 95% bootstrap interval:
+spec_centroid +0.0059 [−0.0146, +0.0273], grad_energy +0.0056 [−0.0027, +0.0147],
+hf_ratio +0.0019 [−0.0264, +0.0324]. **No metric shows a detectable per-model offset at
+n = 20.** Confirmed on a second set of 32 images (the identity-curve set, both models decoded
+on the same machine): spec_centroid +0.0006 [−0.0148, +0.0179], grad_energy −0.0009
+[−0.0064, +0.0048], hf_ratio −0.0025 [−0.0219, +0.0194] — again no detectable offset.
+
+The intervals stay wide, though: even at n = 32, offsets of roughly ±25% (spec_centroid),
+±20% (grad_energy) and ±50% (hf_ratio) of the VAR value are not ruled out, and none of the
+three metrics picks up the heavier posterization seen by eye in VAR's contact sheets
+(finding 8). Practical consequence: cross-model figures on a pixel metric still plot each
+model relative to its own final value. P3's primary metrics, latent `rel_dist` and
+`identity_progress`, are relative to each model's own final image by construction and are
+unaffected. Tables: `lanes/p3/results/model_signature*.csv`.
 
 ---
 

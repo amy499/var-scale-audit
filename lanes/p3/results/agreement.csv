@@ -1,0 +1,11 @@
+a,b,n,rho,p,significant_p05
+p1_remove,p2_validity_sev2,10,-0.2485,0.4888,no
+p1_remove,p2_damaged_sev2,10,-0.2121,0.5563,no
+p1_remove,p3_energy,10,-0.2067,0.5667,no
+p1_remove,p3_identity,10,-0.0851,0.8152,no
+p2_validity_sev2,p2_damaged_sev2,10,0.7818,0.0075,yes
+p2_validity_sev2,p3_energy,10,0.3404,0.3358,no
+p2_validity_sev2,p3_identity,10,0.231,0.5208,no
+p2_damaged_sev2,p3_energy,10,-0.0365,0.9203,no
+p2_damaged_sev2,p3_identity,10,-0.231,0.5208,no
+p3_energy,p3_identity,10,0.9512,0.0,yes
