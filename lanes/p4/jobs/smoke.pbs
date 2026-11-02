@@ -1,0 +1,42 @@
+#!/bin/bash
+#PBS -N p4_smoke
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -o outputs/p4/pbs/
+# P4 GPU smoke test (docs/HANDOVER.md 2.6), copied from scripts/examples/smoke.pbs.
+# Submit from the repo root with P4's own project, never P1's:
+#     qsub -P <your-project-id> lanes/p4/jobs/smoke.pbs
+# then confirm it is charged correctly:  qstat -f <JOBID> | grep -i project
+# A MISMATCH is never worked around: send P1 the output folder listing and job.log.
+# Passes when both regression lines end in PASS.
+set -uo pipefail
+[[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
+cd "$PBS_O_WORKDIR"
+[[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
+
+VAR_CONFIG="${VAR_CONFIG:-configs/var_d20.yaml}"
+DIT_CONFIG="${DIT_CONFIG:-configs/dit_xl2_256.yaml}"
+EXPECT_VAR="${EXPECT_VAR:-f16021ea827ab2ea38e70aab22b8e87d64a47f2c9bc8d6500fce72108cdef2c8}"   # VAR d20 fp32
+EXPECT_DIT="${EXPECT_DIT:-2a3a0d6fbce9}"
+JOB="${PBS_JOBID%%.*}"
+OUT="${OUT_ROOT:-outputs/p4}/smoke/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1
+
+nvidia-smi
+python scripts/check_third_party.py
+python -m runner.generate --config "$VAR_CONFIG" --class-id 207 --seed 0 --out "$OUT/var" --save-raw
+python -m runner.generate --config "$DIT_CONFIG" --class-id 207 --seed 0 --out "$OUT/dit" --save-raw
+python scripts/phase3/regression.py --out "$OUT/regression.json" \
+    var "$OUT/var.pt" - "$EXPECT_VAR" \
+    dit "$OUT/dit.pt" - "$EXPECT_DIT"
