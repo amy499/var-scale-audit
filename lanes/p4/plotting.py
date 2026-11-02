@@ -81,6 +81,17 @@ class MetricSpec:
         return f"{self.label or self.name}  ({direction_phrase(self.direction)})"
 
 
+# P3's metrics as written to metrics.csv by lanes.p3.p3_metrics and lanes.p2.quality
+# (lanes/p3/README.md "the metric set"). Without these, an unknown metric would be drawn as
+# higher-is-better, which is backwards for incep_cos, a distance to the paired baseline image.
+P3_METRIC_SPECS = {
+    "incep_cos": MetricSpec("incep_cos", "lower_is_better", "per_image",
+                            "fidelity: Inception cosine distance to baseline"),
+    "cls_prob": MetricSpec("cls_prob", "higher_is_better", "per_image",
+                           "validity: classifier probability of the class"),
+}
+
+
 # ---------------------------------------------------------------- data layer (standard library only)
 
 def direction_phrase(direction: str) -> str:

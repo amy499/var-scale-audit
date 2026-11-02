@@ -550,6 +550,107 @@ def check_figure5(c: Checks):
             c.that(f"one-lane frame renders via {backend} without collapsing", out.exists())
 
 
+def _sweep_value(protect_gap=0.0, damage_gap=0.0):
+    """Metric values for a synthetic sweep: control is a fixed per-image value, and protect and
+    damage sit `protect_gap` / `damage_gap` away from it on every image (positive = higher)."""
+    def value(arm, band, m, metric, c, s):
+        base = 0.2 + 0.01 * ((c + s) % 7) + 0.001 * m
+        if arm == "protect":
+            return base + protect_gap
+        if arm == "damage":
+            return base + damage_gap
+        return base
+    return value
+
+
+def check_export(c: Checks):
+    import tempfile
+
+    from lanes.p4 import export, plotting
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        root = fixtures.write_sweep_root(tmp / "var", "var", _sweep_value(protect_gap=0.0, damage_gap=-0.05))
+        rows = export.summary_rows(export.load_root(root))
+        c.equal("one summary row per (band, arm, m) plus the baseline", len(rows), 1 + 27)
+        c.equal("the baseline row comes first", (rows[0]["arm"], rows[0]["band"]), ("baseline", "all"))
+        protect = [r for r in rows if r["arm"] == "protect"]
+        damage = [r for r in rows if r["arm"] == "damage"]
+        control = [r for r in rows if r["arm"] == "control"]
+        c.that("protect equal to control image for image: every protect - control CI contains 0",
+               all(r["cls_prob_vs_control_lo"] <= 0 <= r["cls_prob_vs_control_hi"] for r in protect),
+               f"{[(r['cls_prob_vs_control_lo'], r['cls_prob_vs_control_hi']) for r in protect][:2]}")
+        c.that("damage worse on every image: every damage - control CI excludes 0, below it",
+               all(r["cls_prob_vs_control_hi"] < 0 for r in damage))
+        c.close("the damage contrast estimate is the per-image gap", damage[0]["cls_prob_vs_control"], -0.05,
+                1e-9)
+        c.that("control rows carry no contrast with themselves",
+               all(r.get("cls_prob_vs_control") is None for r in control))
+        c.that("every arm row carries a CI around its own mean",
+               all(r["incep_cos_lo"] <= r["incep_cos"] <= r["incep_cos_hi"] for r in rows))
+        c.that("VAR rows report no saving", all(r["saving"] == "" for r in rows))
+
+        # byte-identical on a re-run
+        a = export.write_rows(rows, export.SUMMARY_COLUMNS, tmp / "a.csv").read_bytes()
+        b = export.write_rows(export.summary_rows(export.load_root(root)), export.SUMMARY_COLUMNS,
+                              tmp / "b.csv").read_bytes()
+        c.that("the same root summarizes byte-identically twice", a == b)
+        c.that("the bootstrap constants are written into the output",
+               f",{export.BOOT_N},{export.BOOT_SEED}" in a.decode().splitlines()[1])
+
+        # DiT reports its measured saving
+        dit = fixtures.write_sweep_root(tmp / "dit", "dit", _sweep_value(), band_names=("middle",))
+        dit_rows = export.summary_rows(export.load_root(dit))
+        c.that("DiT arm rows report a positive sampling-time saving",
+               all(isinstance(r["saving"], float) and r["saving"] > 0 for r in dit_rows[1:]))
+
+        # an arm with an image the baseline does not have is refused, not dropped
+        bad = fixtures.write_sweep_root(tmp / "bad", "var", _sweep_value(), band_names=("middle",))
+        victim = bad / "middle" / "protect_m1" / "metrics.csv"
+        victim.write_text(victim.read_text().replace("207,0,", "999,0,"))
+        c.raises("an arm image with no baseline match is refused",
+                 lambda: export.summary_rows(export.load_root(bad)), "image sets differ", export.ExportError)
+        nocontrol = fixtures.write_sweep_root(tmp / "noctl", "var", _sweep_value(), band_names=("middle",),
+                                              skip={("middle", "control", 2)})
+        c.raises("a contrast with no control arm is refused",
+                 lambda: export.summary_rows(export.load_root(nocontrol)), "no control arm",
+                 export.ExportError)
+
+        # compare: a flipped contrast is flagged, a matching one agrees
+        flipped = fixtures.write_sweep_root(tmp / "flip", "var", _sweep_value(protect_gap=0.0, damage_gap=+0.05))
+        s1 = export.write_rows(rows, export.SUMMARY_COLUMNS, tmp / "s1.csv")
+        s2 = export.write_rows(export.summary_rows(export.load_root(flipped)), export.SUMMARY_COLUMNS,
+                               tmp / "s2.csv")
+        cmp_rows = export.compare_rows([("seed1", export.read_summary(s1)), ("seed2", export.read_summary(s2))])
+        dmg = [r for r in cmp_rows if r["arm"] == "damage" and r["metric"] == "cls_prob"]
+        c.that("compare flags every flipped damage contrast as disagreeing",
+               dmg and all(r["sign_agree"] is False and r["ci_overlap"] is False for r in dmg))
+        same = export.compare_rows([("a", export.read_summary(s1)), ("b", export.read_summary(s1))])
+        c.that("compare of a summary with itself agrees everywhere it has an estimate",
+               all(r["ci_overlap"] is True for r in same if r["ref_est"] not in (None, 0.0)))
+        partial = export.compare_rows([("a", export.read_summary(s1)),
+                                       ("b", [r for r in export.read_summary(s2) if r["band"] != "late"])])
+        c.that("a contrast missing from a repeat is reported as missing",
+               any(r["sign_agree"] == "missing" and r["band"] == "late" for r in partial))
+        c.raises("compare needs two summaries", lambda: export.compare_rows([("a", [])]), "at least two",
+                 export.ExportError)
+
+        # tidy round-trips through the shared reader
+        tidy = export.tidy_rows(export.load_root(root))
+        back = plotting.read_tidy(plotting.write_tidy(tidy, tmp / "tidy.csv"))
+        c.equal("the tidy table round-trips through plotting.read_tidy", len(back), len(tidy))
+        c.that("the tidy run_id names the candidate band and budget",
+               any(r["run_id"] == "var/middle/protect_m2" for r in back))
+
+        # the CLI writes all three tables
+        from contextlib import redirect_stdout
+        import io
+        with redirect_stdout(io.StringIO()):
+            rc = [export.main(["summary", str(root), "--out", str(tmp / "cli_s.csv")]),
+                  export.main(["tidy", str(root), "--out", str(tmp / "cli_t.csv")]),
+                  export.main(["compare", f"a={tmp / 'cli_s.csv'}", f"b={s2}", "--out", str(tmp / "cli_c.csv")])]
+        c.equal("summary, tidy and compare all exit 0 from the CLI", rc, [0, 0, 0])
+
+
 def check_data_layer_is_dependency_free(c: Checks):
     """Prove the data layer never imports a plotting library, by blocking both and doing the work."""
     import subprocess
@@ -647,6 +748,7 @@ def main(argv=None):
     sections = [("U1 progress mapping", check_progress), ("U2 frozen bands", check_bands),
                 ("U3 shared plot template", check_template),
                 ("U4 Figure 5 synthesis frame", check_figure5),
+                ("Phase C export: tidy, paired-CI summary, compare", check_export),
                 ("U3/U4 data layer needs no plotting library", check_data_layer_is_dependency_free)]
     ok = True
     for title, fn in sections:

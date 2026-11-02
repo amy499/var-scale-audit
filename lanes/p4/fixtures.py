@@ -170,6 +170,50 @@ def run_record(model: str, stages: list[dict], rows=((207, 0),), **extra) -> dic
             **extra}
 
 
+def write_sweep_root(root, model: str, value, *, band_names=None, images=((207, 0), (207, 1), (360, 0),
+                                                                          (360, 1), (361, 2), (208, 3)),
+                     seed=None, skip=()) -> Path:
+    """A scored sweep root as lanes/p4/pilot.py and lanes/p4/score.py leave it, with no GPU.
+
+    `value(arm, band, m, metric, class_id, seed)` gives each image's metric value. The stage sets are
+    the real arm plans of the frozen config. `skip` names (band, arm, m) conditions to leave out, so a
+    check can build a sweep that is missing an arm or a budget. DiT runs get a sampling time that falls
+    with the number of skipped steps; VAR runs all take the same time.
+    """
+    import json
+
+    from lanes.p4 import arms, bands
+    root = Path(root)
+    band_names = band_names or bands.BANDS
+    stages = frozen_stages(model)
+    n = len(stages)
+    kw = {} if seed is None else {"seed": seed}
+
+    def write(d: Path, arm: str, band: str, m: int, chosen):
+        d.mkdir(parents=True, exist_ok=True)
+        kept = [s for s in stages if s["stage"] not in set(chosen)] if model == "dit" else stages
+        record = run_record(model, kept, rows=images, seconds={"sample": 100.0 * (1 - m / n) if
+                                                                model == "dit" else 30.0},
+                            skip_timesteps=list(chosen) if model == "dit" else [])
+        (d / "run.json").write_text(json.dumps(record))
+        (d / "pilot.json").write_text(json.dumps({"arm": arm, "m": m, "band": band, "fraction": m / n,
+                                                  "stages": list(chosen)}))
+        lines = ["class_id,seed,metric,value,stage"]
+        for metric in ("incep_cos", "cls_prob"):
+            for c, s in images:
+                lines.append(f"{c},{s},{metric},{float(value(arm, band, m, metric, c, s))!r},")
+        (d / "metrics.csv").write_text("\n".join(lines) + "\n")
+
+    write(root / arms.BASELINE, arms.BASELINE, "all", 0, [])
+    for band in band_names:
+        for m in arms.budget_grid(model, stages, band):
+            plan = arms.arm_plan(model, stages, band, m, **kw)
+            for arm in arms.INTERVENED_ARMS:
+                if (band, arm, m) not in set(skip):
+                    write(root / band / f"{arm}_m{m}", arm, band, m, plan[arm]["stages"])
+    return root
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) != 1 or argv[0] not in CONFIGS:

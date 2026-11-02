@@ -36,15 +36,7 @@ from lanes.p4.verify_pairing import find_runs  # noqa: E402
 
 VAR_NO_SAVING = "VAR: no compute saving - the intervention runs after the transformer pass"
 
-# P3's metrics as written to metrics.csv by lanes.p3.p3_metrics and lanes.p2.quality
-# (lanes/p3/README.md "the metric set"). Without these, an unknown --metric would be drawn as
-# higher-is-better, which is backwards for incep_cos, a distance to the paired baseline image.
-P3_METRIC_SPECS = {
-    "incep_cos": plotting.MetricSpec("incep_cos", "lower_is_better", "per_image",
-                                     "fidelity: Inception cosine distance to baseline"),
-    "cls_prob": plotting.MetricSpec("cls_prob", "higher_is_better", "per_image",
-                                    "validity: classifier probability of the class"),
-}
+P3_METRIC_SPECS = plotting.P3_METRIC_SPECS
 
 
 def _metric_values(run_dir: Path, metric: str) -> list[float]:
