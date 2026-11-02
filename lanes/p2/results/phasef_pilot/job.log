@@ -1,0 +1,39 @@
+/home/users/ntu/riddhima/.conda/envs/var-dit/lib/python3.10/site-packages/torch/nn/modules/conv.py:456: UserWarning: Applied workaround for CuDNN issue, install nvrtc.so (Triggered internally at /opt/conda/conda-bld/pytorch_1702400366987/work/aten/src/ATen/native/cudnn/Conv_v8.cpp:80.)
+  return F.conv2d(input, weight, bias, self.stride,
+outputs/p2/phasef/26089558/recon/recon.csv: 16 images, mean psnr 29.26 dB, mean hf_ratio 0.880
+== start at timestep 96
+/home/users/ntu/riddhima/.conda/envs/var-dit/lib/python3.10/site-packages/torch/nn/modules/conv.py:456: UserWarning: Applied workaround for CuDNN issue, install nvrtc.so (Triggered internally at /opt/conda/conda-bld/pytorch_1702400366987/work/aten/src/ATen/native/cudnn/Conv_v8.cpp:80.)
+  return F.conv2d(input, weight, bias, self.stride,
+[16/16] rows done
+wrote 16 images to outputs/p2/phasef/26089558/t96  (attention: math)
+outputs/p2/phasef/26089558/t96/transfer.csv: 16 images, mean psnr 23.94 dB, mean hf_ratio 0.935
+== start at timestep 297
+/home/users/ntu/riddhima/.conda/envs/var-dit/lib/python3.10/site-packages/torch/nn/modules/conv.py:456: UserWarning: Applied workaround for CuDNN issue, install nvrtc.so (Triggered internally at /opt/conda/conda-bld/pytorch_1702400366987/work/aten/src/ATen/native/cudnn/Conv_v8.cpp:80.)
+  return F.conv2d(input, weight, bias, self.stride,
+[16/16] rows done
+wrote 16 images to outputs/p2/phasef/26089558/t297  (attention: math)
+outputs/p2/phasef/26089558/t297/transfer.csv: 16 images, mean psnr 19.58 dB, mean hf_ratio 0.894
+== t297_noise_s197_sev1.0
+/home/users/ntu/riddhima/.conda/envs/var-dit/lib/python3.10/site-packages/torch/nn/modules/conv.py:456: UserWarning: Applied workaround for CuDNN issue, install nvrtc.so (Triggered internally at /opt/conda/conda-bld/pytorch_1702400366987/work/aten/src/ATen/native/cudnn/Conv_v8.cpp:80.)
+  return F.conv2d(input, weight, bias, self.stride,
+[16/16] rows done
+wrote 16 images to outputs/p2/phasef/26089558/t297_noise_s197_sev1.0  (attention: math)
+wrote 32 image metric rows to outputs/p2/phasef/26089558/t297_noise_s197_sev1.0/metrics.csv
+outputs/p2/phasef/26089558/t297_noise_s197_sev1.0/transfer.csv: 16 images, mean psnr 15.20 dB, mean hf_ratio 1.265
+== start at timestep 497
+/home/users/ntu/riddhima/.conda/envs/var-dit/lib/python3.10/site-packages/torch/nn/modules/conv.py:456: UserWarning: Applied workaround for CuDNN issue, install nvrtc.so (Triggered internally at /opt/conda/conda-bld/pytorch_1702400366987/work/aten/src/ATen/native/cudnn/Conv_v8.cpp:80.)
+  return F.conv2d(input, weight, bias, self.stride,
+[16/16] rows done
+wrote 16 images to outputs/p2/phasef/26089558/t497  (attention: math)
+outputs/p2/phasef/26089558/t497/transfer.csv: 16 images, mean psnr 15.87 dB, mean hf_ratio 1.806
+== t497_noise_s197_sev1.0
+/home/users/ntu/riddhima/.conda/envs/var-dit/lib/python3.10/site-packages/torch/nn/modules/conv.py:456: UserWarning: Applied workaround for CuDNN issue, install nvrtc.so (Triggered internally at /opt/conda/conda-bld/pytorch_1702400366987/work/aten/src/ATen/native/cudnn/Conv_v8.cpp:80.)
+  return F.conv2d(input, weight, bias, self.stride,
+[16/16] rows done
+wrote 16 images to outputs/p2/phasef/26089558/t497_noise_s197_sev1.0  (attention: math)
+wrote 32 image metric rows to outputs/p2/phasef/26089558/t497_noise_s197_sev1.0/metrics.csv
+outputs/p2/phasef/26089558/t497_noise_s197_sev1.0/transfer.csv: 16 images, mean psnr 13.29 dB, mean hf_ratio 1.734
+/var/spool/pbs/mom_priv/jobs/26089558.pbs101.SC: line 55: git: command not found
+/var/spool/pbs/mom_priv/jobs/26089558.pbs101.SC: line 55: git: command not found
+code:  
+PHASE F DONE
