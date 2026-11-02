@@ -334,6 +334,149 @@ def check_tiny_dit(c: Checks, tiny_dir: Path, work: Path):
            base["stages"][0]["stage"] not in arm["skip_timesteps"])
 
 
+# ---------------------------------------------------------------- the scoring driver (no torch)
+
+class _StubScorers:
+    """Writes a valid row for every metric of each step, and records the order the steps ran in."""
+
+    def __init__(self, fail_quality_on=()):
+        self.calls, self.fail_quality_on = [], set(fail_quality_on)
+
+    def _write(self, run_dir, names, step):
+        from lanes.p2.schema import replace_metrics
+        self.calls.append((step, run_dir.name, sorted(p.name for p in run_dir.glob("*.pt"))))
+        replace_metrics(run_dir, names, [{"class_id": 207, "seed": 0, "metric": n, "value": 0.5}
+                                         for n in names])
+
+    def quality(self, run_dir):
+        from lanes.p4 import score
+        if run_dir.name in self.fail_quality_on:
+            self.calls.append(("quality", run_dir.name, []))
+            raise RuntimeError("stub quality failure")
+        self._write(run_dir, score.QUALITY_METRICS, "quality")
+        (run_dir / score.FEATURES).write_bytes(b"npz")
+
+    def fidelity(self, run_dir, baseline):
+        from lanes.p4 import score
+        self._write(run_dir, (score.FIDELITY_METRIC,), "fidelity")
+
+    def placeholder(self, run_dir, baseline):
+        from lanes.p4 import metric_placeholder
+        self._write(run_dir, metric_placeholder.METRIC_NAMES, "placeholder")
+        self.calls[-1] = (*self.calls[-1], sorted(p.name for p in baseline.glob("*.pt")))
+
+
+def _score_fixture(root: Path, arm_names=("protect_m1", "damage_m1", "control_m1")) -> Path:
+    import shutil
+    shutil.rmtree(root, ignore_errors=True)
+    for name in (arms.BASELINE, *arm_names):
+        d = root / "middle" / name if name != arms.BASELINE else root / name
+        d.mkdir(parents=True)
+        (d / "run.json").write_text("{}")
+        for i in range(2):
+            (d / f"img{i}.pt").write_bytes(b"x")
+    return root
+
+
+def check_score(c: Checks):
+    import io
+    import tempfile
+    from contextlib import redirect_stdout
+
+    from lanes.p4 import score
+
+    def run(root, **kw):
+        lines = []
+        failed = score.score_root(root, log=lines.append, **kw)
+        return failed, lines
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        # --- happy path: baseline first, each arm's raw dropped only after its placeholder, baseline last
+        root = _score_fixture(tmp / "root")
+        stub = _StubScorers()
+        failed, lines = run(root, scorers=stub)
+        c.equal("a clean root scores with no failures", failed, 0)
+        c.equal("the last line is the COMPLETE line", lines[-1], score.COMPLETE)
+        c.equal("the baseline is scored first, all three steps",
+                [(s, d) for s, d, *_ in stub.calls[:3]],
+                [("quality", "baseline"), ("fidelity", "baseline"), ("placeholder", "baseline")])
+        arm_calls = [call for call in stub.calls[3:] if call[0] == "placeholder"]
+        c.that("each arm still has its raw tensors when its placeholder runs",
+               all(call[2] == ["img0.pt", "img1.pt"] for call in arm_calls), f"{arm_calls}")
+        c.that("the baseline still has its raw tensors for every arm's placeholder",
+               all(call[3] == ["img0.pt", "img1.pt"] for call in arm_calls), f"{arm_calls}")
+        c.equal("every arm's raw tensors are gone afterwards",
+                sorted(p.relative_to(root).as_posix() for p in root.rglob("*.pt")), [])
+        c.that("every run is scored", all(score.is_scored(d) for d in
+                                          [root / "baseline", *(root / "middle").iterdir()]))
+
+        # --- re-run on a fully scored root: nothing recomputed, exit 0
+        stub2 = _StubScorers()
+        failed, lines = run(root, scorers=stub2)
+        c.equal("a re-run on a scored root recomputes nothing", stub2.calls, [])
+        c.equal("a re-run on a scored root still completes", (failed, lines[-1]), (0, score.COMPLETE))
+
+        # --- KEEP_RAW: nothing deleted
+        root = _score_fixture(tmp / "keep")
+        failed, _ = run(root, scorers=_StubScorers(), keep_raw=True)
+        c.equal("keep_raw deletes no .pt file", (failed, len(list(root.rglob("*.pt")))), (0, 8))
+
+        # --- one arm fails: the others are still scored, the exit is non-zero, raw kept where needed
+        root = _score_fixture(tmp / "partial")
+        stub3 = _StubScorers(fail_quality_on={"damage_m1"})
+        failed, lines = run(root, scorers=stub3)
+        c.equal("one failing arm is counted", failed, 1)
+        c.that("the failure is reported, not COMPLETE", lines[-1].startswith("P4 SCORING FAILED"),
+               lines[-1])
+        c.that("the other arms are still scored",
+               score.is_scored(root / "middle" / "protect_m1")
+               and score.is_scored(root / "middle" / "control_m1"))
+        c.equal("the failed arm keeps its raw tensors", len(score.raw_files(root / "middle" / "damage_m1")), 2)
+        c.equal("the baseline keeps its raw tensors while an arm still needs them",
+                len(score.raw_files(root / "baseline")), 2)
+        # and the resume then finishes the job
+        failed, lines = run(root, scorers=_StubScorers())
+        c.equal("a resume after the failure completes", (failed, lines[-1]), (0, score.COMPLETE))
+        c.equal("the resume leaves no raw tensors", len(list(root.rglob("*.pt"))), 0)
+
+        # --- a placeholder whose raw tensors are already gone fails that arm instead of guessing
+        root = _score_fixture(tmp / "noraw")
+        for p in (root / "middle" / "control_m1").glob("*.pt"):
+            p.unlink()
+        failed, lines = run(root, scorers=_StubScorers())
+        c.equal("an arm whose raw tensors are gone fails", failed, 1)
+        c.that("its failure says the tensors are gone", any("are gone" in l for l in lines), f"{lines}")
+
+        # --- no baseline: refuse before scoring anything
+        root = _score_fixture(tmp / "nobase")
+        import shutil
+        shutil.rmtree(root / "baseline")
+        stub4 = _StubScorers()
+        c.raises("a root with no baseline refuses", lambda: run(root, scorers=stub4), "baseline",
+                 SystemExit)
+        c.equal("... and scores nothing", stub4.calls, [])
+
+        # --- the CLI's exit code follows the failures
+        root = _score_fixture(tmp / "cli")
+        orig = score.Scorers
+        score.Scorers = lambda device=None: _StubScorers(fail_quality_on={"protect_m1"})
+        try:
+            with redirect_stdout(io.StringIO()):
+                c.equal("the CLI exits 1 when an arm fails", score.main([str(root)]), 1)
+            score.Scorers = lambda device=None: _StubScorers()
+            with redirect_stdout(io.StringIO()):
+                c.equal("the CLI exits 0 once everything is scored", score.main([str(root)]), 0)
+        finally:
+            score.Scorers = orig
+
+    # --- the job scripts parse
+    for script in sorted((REPO / "lanes" / "p4" / "jobs").glob("*")):
+        if script.suffix in (".pbs", ".sh"):
+            r = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+            c.that(f"bash -n {script.name}", r.returncode == 0, r.stderr.strip())
+
+
 # ---------------------------------------------------------------- the driver and the pairing gate
 
 def check_driver(c: Checks, tiny_dir: Path, work: Path):
@@ -476,7 +619,7 @@ def main(argv=None):
 
     print("== P4 pilot self-check (CPU; proves the mechanics, never a result)")
     skipped = []
-    sections = [("arm construction", check_arms)]
+    sections = [("arm construction", check_arms), ("scoring driver and job scripts", check_score)]
     if not args.arms_only:
         sections.append(("VAR hook, called directly", check_hook_unit))
     else:
