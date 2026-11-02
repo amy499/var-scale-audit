@@ -63,10 +63,31 @@ class ArmError(ValueError):
     """An arm that cannot be built, with the numbers that make it impossible named."""
 
 
-def _band_context(model: str, stages, band: str) -> tuple[list[int], set]:
-    """(native stage ids in sampling order, the stages of `band`) from one mapping of the table."""
+def candidate_label(band) -> str:
+    """How a candidate set is named in records and directories: the band name, or `s2+3+4`."""
+    return band if isinstance(band, str) else "s" + "+".join(str(s) for s in sorted(band))
+
+
+def _band_context(model: str, stages, band) -> tuple[list[int], set]:
+    """(native stage ids in sampling order, the candidate set's stages) from one mapping of the table.
+
+    `band` is a frozen band name, or an explicit collection of native stage ids (a shortlisted set,
+    lanes/p4/shortlist.py). A band name is just one way of naming a set: both go through the same
+    construction, so the budget, window-matching and control rules are identical (KTD8).
+    """
     mapped = bands.assign_bands(progress.map_stages(model, stages))
-    return [row["stage"] for row in mapped], {row["stage"] for row in mapped if row["band"] == band}
+    ordered = [row["stage"] for row in mapped]
+    if isinstance(band, str):
+        if band not in bands.BANDS:
+            raise ArmError(f"band must be one of {bands.BANDS} or a set of stage ids, got {band!r}")
+        return ordered, {row["stage"] for row in mapped if row["band"] == band}
+    chosen = set(band)
+    if not chosen:
+        raise ArmError("an explicit candidate set needs at least one stage")
+    unknown = sorted(chosen - set(ordered))
+    if unknown:
+        raise ArmError(f"candidate stages {unknown} are not native {model} stages of this table")
+    return ordered, chosen
 
 
 def first_step_excluded(model: str, ordered: list[int]) -> tuple[int, ...]:
@@ -180,11 +201,12 @@ def _place(runs: list[tuple[int, int]], lengths: tuple[int, ...],
     return sorted(out)
 
 
-def arm_plan(model: str, stages, band: str, m: int, *, seed: int = CONTROL_SEED,
+def arm_plan(model: str, stages, band, m: int, *, seed: int = CONTROL_SEED,
              lam: float = VAR_GATE_B_LAMBDA) -> dict:
-    """Every arm's stage set at one budget. Returns {arm: record}; see `arm_record` for the fields."""
-    if band not in bands.BANDS:
-        raise ArmError(f"band must be one of {bands.BANDS}, got {band!r}")
+    """Every arm's stage set at one budget. Returns {arm: record}; see `arm_record` for the fields.
+
+    `band` is a frozen band name or an explicit set of stage ids; records carry `candidate_label`.
+    """
     if not isinstance(m, int) or isinstance(m, bool) or m < 0:
         raise ArmError(f"budget m must be a non-negative integer, got {m!r}")
     if model == "var" and lam != VAR_GATE_B_LAMBDA:
@@ -201,7 +223,7 @@ def arm_plan(model: str, stages, band: str, m: int, *, seed: int = CONTROL_SEED,
         blocked = first_step_excluded(model, ordered)
         extra = (f" ({k} stages in the band, minus the unskippable first step {blocked[0]})"
                  if blocked and blocked[0] in in_band else f" ({k} stages in the band)")
-        raise ArmError(f"budget m = {m} exceeds the {band} band's eligible-stage count "
+        raise ArmError(f"budget m = {m} exceeds the {candidate_label(band)} band's eligible-stage count "
                        f"{len(damage_eligible)}{extra}; damage must fit inside the band, so "
                        f"m <= {len(damage_eligible)} and the intervened fraction is capped at "
                        f"{len(damage_eligible) / n:.3f}")
@@ -234,7 +256,8 @@ def arm_plan(model: str, stages, band: str, m: int, *, seed: int = CONTROL_SEED,
                            "equal budget would not mean equal window structure")
 
     sets = {"baseline": [], "damage": damage, "protect": protect, "control": control}
-    out = {arm: arm_record(model, arm, band, sets[arm], ordered, k, lam, used_seed) for arm in ARMS}
+    out = {arm: arm_record(model, arm, candidate_label(band), sets[arm], ordered, k, lam, used_seed)
+           for arm in ARMS}
     out["control"]["degenerate"] = degenerate
     return out
 

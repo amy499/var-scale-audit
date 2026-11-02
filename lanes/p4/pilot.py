@@ -59,19 +59,19 @@ def _stages_for(model: str, config: Path):
     return stages
 
 
-def _band_plans(model: str, stages, band: str, fractions, seed: int) -> tuple[list[int], dict]:
+def _band_plans(model: str, stages, band, fractions, seed: int) -> tuple[list[int], dict]:
     budgets = arms.budget_grid(model, stages, band, fractions)
     plans = {m: arms.arm_plan(model, stages, band, m, seed=seed) for m in budgets}
     degenerate = [m for m, plan in plans.items() if plan["control"].get("degenerate")]
     if degenerate:
-        raise ValueError(f"{model} {band} band: the control arm could not be separated from protect or "
+        raise ValueError(f"{model} {arms.candidate_label(band)} band: the control arm could not be separated from protect or "
                          f"damage at budget(s) {degenerate}. Running it would add a fourth arm that "
                          "tests nothing. Choose another budget, band or control seed "
                          "(lanes/p4/comparison_logic.md section 3).")
     return budgets, plans
 
 
-def _intervention_run(model: str, config: Path, manifest: Path, out_dir: Path, band: str, m: int,
+def _intervention_run(model: str, config: Path, manifest: Path, out_dir: Path, band, m: int,
                       arm: str, record: dict) -> dict:
     if model == "var":
         cmd = _cmd(config, manifest, out_dir, hook=HOOK)
@@ -79,7 +79,7 @@ def _intervention_run(model: str, config: Path, manifest: Path, out_dir: Path, b
                arms.ENV_LAMBDA: f"{arms.VAR_GATE_B_LAMBDA:g}"}
     else:
         cmd, env = _cmd(config, manifest, out_dir, skip=record["stages"]), {}
-    return {"arm": arm, "m": m, "band": band, "out_dir": str(out_dir), "record": record,
+    return {"arm": arm, "m": m, "band": arms.candidate_label(band), "out_dir": str(out_dir), "record": record,
             "cmd": cmd, "env": env}
 
 
@@ -89,9 +89,13 @@ def _baseline_run(config: Path, manifest: Path, out_root: Path, record: dict) ->
             "cmd": _cmd(config, manifest, out_root / arms.BASELINE), "env": {}}
 
 
-def plan_runs(model: str, band: str, config: Path, manifest: Path, out_root: Path,
+def plan_runs(model: str, band, config: Path, manifest: Path, out_root: Path,
               fractions=arms.FRACTIONS, seed: int = arms.CONTROL_SEED) -> list[dict]:
-    """The 10-run Gate B pilot for one band, baseline first."""
+    """The four-arm runs for one candidate set, baseline first.
+
+    `band` is a frozen band name (the Gate B pilot) or an explicit tuple of stage ids (a confirmation
+    run for a shortlisted set, lanes/p4/shortlist.py). Budgets are the fractions that fit m <= k.
+    """
     stages = _stages_for(model, config)
     budgets, plans = _band_plans(model, stages, band, fractions, seed)
     runs = [_baseline_run(config, manifest, out_root, plans[budgets[0]][arms.BASELINE])]
@@ -222,6 +226,8 @@ def main(argv=None):
     ap.add_argument("--model", required=True, choices=("var", "dit"))
     ap.add_argument("--band", default="middle", choices=bands.BANDS,
                     help="candidate band for plan/run; plan-full/run-full use every frozen band")
+    ap.add_argument("--stages", help="plan/run only: an explicit candidate set, comma-separated stage "
+                                     "ids (a confirmation run); overrides --band")
     ap.add_argument("--config", type=Path, help="default: the frozen config for this model")
     ap.add_argument("--manifest", type=Path, default=Path(DEFAULT_MANIFEST))
     ap.add_argument("--out-root", type=Path, help="default: outputs/p4/pilot/<model>")
@@ -237,9 +243,17 @@ def main(argv=None):
         runs = plan_full_runs(args.model, config, args.manifest, out_root,
                               fractions=tuple(args.fractions), seed=args.seed)
     else:
-        runs = plan_runs(args.model, args.band, config, args.manifest, out_root,
+        candidate = args.band
+        if args.stages:
+            try:
+                candidate = tuple(sorted({int(x) for x in args.stages.split(",") if x.strip()}))
+            except ValueError:
+                ap.error(f"--stages {args.stages!r}: expected comma-separated stage ids")
+        runs = plan_runs(args.model, candidate, config, args.manifest, out_root,
                          fractions=tuple(args.fractions), seed=args.seed)
     print(describe(runs))
+    if args.stages and is_full:
+        ap.error("--stages selects one candidate set; use it with plan/run, not plan-full/run-full")
     if args.action.startswith("plan"):
         return 0
     return 1 if run_all(runs, out_root, dry_run=args.dry_run) else 0

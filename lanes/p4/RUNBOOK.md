@@ -297,6 +297,21 @@ Figure 4 has one panel per model and band. The shading is each arm's 95% CI. Und
 the paired protect − control and damage − control contrasts are listed wherever their CI
 excludes 0. P3's two conditions are printed on the VAR early and middle panels.
 
+**Phase D: snapshot, Figure 5 and the shortlist.** CPU only. Take the snapshot after P3's deadline
+(Tue 3 Nov 18:00), so that P3's CSVs are in it if they were committed.
+
+```bash
+H=outputs/p4/handoff/$(date +%F)
+python -m lanes.p4.synthesis snapshot --out "$H"            # P1 @ origin/p1/stage-removal, P2/P3 @ origin/main
+python -m lanes.p4.synthesis figure5 "$H" --out-dir "$S" \
+    --p4-summary var="$S/var_seed1_summary.csv" --p4-summary dit="$S/dit_seed1_summary.csv"
+python -m lanes.p4.shortlist "$H" --out-dir "$S"            # P1-P3 only; prints the verdict per model
+```
+
+`shortlist_<model>.json` records the winning window, the lanes used and excluded, the pairwise
+agreement and the verdict. `covered by <band>` means the Phase C sweep already ran that exact set,
+so there are no runs to submit. `new candidate set` prints the three `qsub` lines to run.
+
 **Confirmation runs (Phase D).** Run these only when `lanes/p4/shortlist.py` reports a new candidate
 set. Pass the same scripts `STAGES=<comma list>` and an `OUT_TAG`; the root goes under
 `outputs/p4/confirm/`. Repeat a new set with `SEED=20261070` and on d24 too.

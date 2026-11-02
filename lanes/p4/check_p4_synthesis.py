@@ -18,7 +18,7 @@ sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from lanes.p4 import bands, export, fixtures, synthesis  # noqa: E402
+from lanes.p4 import arms, bands, export, fixtures, pilot, synthesis  # noqa: E402
 from lanes.p4.check_p4_shared import Checks  # noqa: E402
 
 VAR_STAGES = list(range(10))
@@ -152,10 +152,103 @@ def check_figure5(c: Checks):
         c.equal("the tidy table round-trips", len(back), 10)
 
 
+def _scores(var=None, dit=None) -> dict:
+    """synthesis.lane_scores-shaped input: {model: {lane: {stage: value}}}."""
+    return {"var": var or {}, "dit": dit or {}}
+
+
+def check_shortlist(c: Checks):
+    from lanes.p4 import shortlist
+    bump = lambda top: {s: (1.0 if s in top else 0.1 * (s % 3)) for s in VAR_STAGES}   # noqa: E731
+    r = shortlist.shortlist(_scores(var={"p1": bump({0, 1, 2}), "p2": bump({0, 1, 2})}), "var")
+    c.equal("a top window of {0,1,2} is covered by the early band",
+            (r["window"], r["verdict"], r["covering_band"]), ([0, 1, 2], "covered by early", "early"))
+    c.that("a covered set plans no confirmation runs", "confirm" not in r)
+
+    r = shortlist.shortlist(_scores(var={"p1": bump({2, 3, 4}), "p2": bump({2, 3, 4})}), "var")
+    c.equal("a top window of {2,3,4} is a new candidate set", (r["window"], r["verdict"]),
+            ([2, 3, 4], "new candidate set"))
+    c.that("its confirmation is submitted on seed 1, seed 2 and d24",
+           len(r["confirm"]["submit"]) == 3 and all("STAGES=2,3,4" in s for s in r["confirm"]["submit"])
+           and any("SEED=20261070" in s for s in r["confirm"]["submit"])
+           and any("var_d24" in s for s in r["confirm"]["submit"]))
+    runs = pilot.plan_runs("var", (2, 3, 4), REPO / "configs" / "var_d20.yaml",
+                           Path("manifest/frozen_v1_1.csv"), Path("/tmp/x"))
+    c.equal("its confirmation plan is one baseline plus 9 arms", len(runs), 10)
+
+    # a tie between a predeclared band and a non-band window goes to the band
+    tie = {s: (1.0 if s in (3, 4, 5, 6, 7, 8) else 0.0) for s in VAR_STAGES}
+    r = shortlist.shortlist(_scores(var={"p1": tie}), "var")
+    c.equal("a tie between {3,4,5} (a band) and {4,5,6} goes to the band", r["window"], [3, 4, 5])
+
+    # only one lane, a constant lane, and P4 never selecting
+    r = shortlist.shortlist(_scores(var={"p2": bump({6, 7, 8}), "p1": {s: 0.2 for s in VAR_STAGES},
+                                         "p4": bump({0, 1, 2})}), "var")
+    c.equal("with one usable lane the rule still runs and records it", r["lanes_used"], ["p2"])
+    c.that("a constant lane is excluded with a reason", "constant" in r["lanes_excluded"].get("p1", ""))
+    c.that("P4 is excluded from selection", "p4" in r["lanes_excluded"] and r["window"] != [0, 1, 2])
+
+    # agreement: computed on shared stages, or recorded as not computable
+    r = shortlist.shortlist(_scores(var={"p1": bump({2, 3, 4}), "p2": {0: 0.1, 1: 0.5, 9: 0.2},
+                                         "p3_identity": bump({2, 3, 4})}), "var")
+    by_pair = {(a["a"], a["b"]): a for a in r["agreement"]}
+    c.that("identical rankings agree with rho = 1", by_pair[("p1", "p3_identity")]["rho"] == 1.0)
+    c.that("a pair sharing 3 stages is computed", by_pair[("p1", "p2")]["n"] == 3)
+    r = shortlist.shortlist(_scores(var={"p1": bump({2, 3, 4}), "p2": {0: 0.1, 9: 0.2}}), "var")
+    c.that("a pair sharing fewer than 3 stages is 'not computable'",
+           r["agreement"][0]["rho"] is None and "not computable" in r["agreement"][0]["note"])
+
+    # DiT picks among its three bands only, so its verdict is always a covering band
+    dit_bands = synthesis.band_stages("dit")
+    for top in bands.BANDS:
+        p1 = {s: (0.9 if b == top else 0.1) for b, ss in dit_bands.items() for s in ss}
+        r = shortlist.shortlist(_scores(dit={"p1": p1, "p2": {dit_bands[top][5]: 0.8, dit_bands["early"][9]: 0.0,
+                                                               dit_bands["late"][9]: 0.0}}), "dit")
+        c.equal(f"DiT: lanes pointing at {top} give 'covered by {top}'", r["verdict"], f"covered by {top}")
+    c.equal("no lanes at all is reported, not crashed",
+            shortlist.shortlist(_scores(), "var")["verdict"], "no lanes: nothing to shortlist")
+
+
+def check_explicit_sets(c: Checks):
+    for model in ("var", "dit"):
+        stages = fixtures.frozen_stages(model)
+        middle = synthesis.band_stages(model)["middle"]
+        for m in arms.budget_grid(model, stages, "middle"):
+            by_name = arms.arm_plan(model, stages, "middle", m)
+            by_set = arms.arm_plan(model, stages, tuple(middle), m)
+            c.equal(f"{model} m={m}: an explicit set equal to the middle band plans the same stages",
+                    {a: by_set[a]["stages"] for a in arms.ARMS}, {a: by_name[a]["stages"] for a in arms.ARMS})
+        c.equal(f"{model}: an explicit set has the same budget grid as its band",
+                arms.budget_grid(model, stages, tuple(middle)), arms.budget_grid(model, stages, "middle"))
+    stages = fixtures.frozen_stages("var")
+    order = [s["stage"] for s in stages]
+    for m in arms.budget_grid("var", stages, (2, 3, 4)):
+        plan = arms.arm_plan("var", stages, (2, 3, 4), m)
+        c.that(f"VAR {{2,3,4}} m={m}: damage inside, protect outside",
+               set(plan["damage"]["stages"]) <= {2, 3, 4} and not set(plan["protect"]["stages"]) & {2, 3, 4})
+        c.equal(f"VAR {{2,3,4}} m={m}: window lengths match across arms",
+                {plan[a]["windows"] for a in arms.INTERVENED_ARMS}, {plan["damage"]["windows"]})
+        c.equal(f"VAR {{2,3,4}} m={m}: the record names the set", plan["damage"]["band"], "s2+3+4")
+    c.equal("VAR {2,3,4}: m is capped at 3", max(arms.budget_grid("var", stages, (2, 3, 4))), 3)
+    c.raises("a budget above the set's size is refused",
+             lambda: arms.arm_plan("var", stages, (2, 3, 4), 4), "exceeds", arms.ArmError)
+    dit = fixtures.frozen_stages("dit")
+    first = [s["stage"] for s in dit][0]
+    plan = arms.arm_plan("dit", dit, (first, *[s["stage"] for s in dit][1:6]), 5)
+    c.that("DiT: a set holding the first step never damages it", first not in plan["damage"]["stages"])
+    c.raises("DiT: that set's eligible count excludes the first step",
+             lambda: arms.arm_plan("dit", dit, (first, *[s["stage"] for s in dit][1:6]), 6), "unskippable",
+             arms.ArmError)
+    c.raises("a stage id the table does not have is refused",
+             lambda: arms.arm_plan("var", stages, (2, 3, 42), 1), "not native", arms.ArmError)
+    c.that("the stage order is untouched", order == list(range(10)))
+
+
 def main(argv=None):
     print("== P4 synthesis self-check (CPU; snapshot, adapters, Figure 5, shortlist)")
     sections = [("snapshot from git refs", check_snapshot), ("lane adapters", check_adapters),
-                ("Figure 5 from a snapshot", check_figure5)]
+                ("Figure 5 from a snapshot", check_figure5), ("shortlist rule", check_shortlist),
+                ("explicit candidate sets in the arm construction", check_explicit_sets)]
     ok = True
     for title, fn in sections:
         c = Checks()
