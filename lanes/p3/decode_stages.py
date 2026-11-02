@@ -34,8 +34,27 @@ With --vae-only the transformer is never built or loaded, `require_checkpoints` 
 called, and the decode runs on CPU in a couple of minutes for 5 images x 10 scales. That
 turns check 3 from "needs cluster access" into "needs a 436 MB download".
 
+**DiT works the same way.** Its decoder is a diffusers AutoencoderKL (sd-vae-ft-ema), two
+files listed with pinned sha256 in configs/dit_xl2_256.yaml:
+
+    checkpoints/sd-vae-ft-ema/config.json                          < 1 KB
+    checkpoints/sd-vae-ft-ema/diffusion_pytorch_model.safetensors  ~335 MB
+    checkpoints/dit/DiT-XL-2-256x256.pt                            2.7 GB  <- NOT needed
+
+Both files are checked against their sha256 BEFORE torch is imported, so a missing or
+half-finished download fails at once with the exact command to fix it. The load itself is
+the same call runner/dit_model.py makes on the cluster.
+
 Normal mode (no flag) still loads the full model, which is what you want if the checkpoints
 are already there.
+
+STAGE ORDER
+-----------
+VAR scales count UP (0 = coarsest). DiT timesteps count DOWN: 999 is pure noise, 0 is the
+finished image. Stages are therefore decoded and laid out in GENERATION order — VAR 0 -> 9,
+DiT 999 -> 0 — so the contact sheet always reads left to right as the model built the
+image. (Sorting DiT's timesteps numerically would put the clean image first and make a
+correct extraction look reversed.)
 
 HOW IT DECODES
 --------------
@@ -53,8 +72,23 @@ RUN IT
     python -m lanes.p3.decode_stages --stages outputs/p3/pilot/stages \
         --model var --config configs/var_d20.yaml --n 5
 
+    # DiT, laptop: the same 32 images the VAR semantic curve used, 8 rows on the sheet
+    python -m lanes.p3.decode_stages --stages 25985813_p3_dit_stages --model dit \
+        --config configs/dit_xl2_256.yaml --vae-only --device mps --n 32 --sheet-rows 8
+
+    # DiT finished images only, for exactly the images in a folder of baseline PNGs
+    python -m lanes.p3.decode_stages --stages 25985813_p3_dit_stages --model dit \
+        --config configs/dit_xl2_256.yaml --vae-only --device mps \
+        --keys-like for_darien_20_clean_pngs --final-only --out-dir outputs/p3/dit_finals
+
 Writes `<out-dir>/contact_<model>.png`: one row per image, one column per stage, plus the
-individual PNGs. Open the contact sheet and look at it.
+individual PNGs. Open the contact sheet and look at it. (With --final-only there is one
+stage, so only the PNGs are written.)
+
+Why DiT's final stage IS the finished image: at the last DDPM step (t = 0) the posterior
+mean has coefficient 1 on pred_xstart and 0 on x_t, so the sample the runner returns is
+exactly pred_xstart at t = 0. Decoding it here reproduces the baseline PNG up to the
+VAE's float rounding on a different device (a level or so out of 255).
 
 Owner: P3.
 """
@@ -82,14 +116,15 @@ def load_vae_only(cfg, model_name, device=None):
 
     The build kwargs are read from the same config the real runner uses, so the decoder is
     bit-for-bit the one that produced the images.
+
+    DiT is handled by `_load_dit_vae` (a diffusers AutoencoderKL, loaded differently).
     """
+    if model_name == "dit":
+        return _load_dit_vae(cfg, device)
+
     import torch
     from runner import upstream
     from runner.config import resolve_path
-
-    if model_name != "var":
-        raise SystemExit("--vae-only currently supports VAR only; DiT's VAE is a diffusers "
-                         "AutoencoderKL and loads differently.")
 
     ckpt = resolve_path(cfg["checkpoints"]["vae"]["path"])
     if not ckpt.is_file():
@@ -118,6 +153,116 @@ def load_vae_only(cfg, model_name, device=None):
     m = _VaeOnly()
     m.vae, m.device = vae, dev
     return m
+
+
+def _sha256(path, chunk=8 << 20):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def _show(path):
+    """A path as a user should type it: repo-relative when possible, and shell-quoted,
+    because the repo may live under a folder whose name contains spaces."""
+    import shlex
+    path = Path(path)
+    try:
+        path = path.resolve().relative_to(REPO)
+    except ValueError:
+        pass
+    return shlex.quote(str(path))
+
+
+def _load_dit_vae(cfg, device=None):
+    """Build and load ONLY DiT's decoder: the diffusers AutoencoderKL (sd-vae-ft-ema).
+
+    Decoding `pred_xstart` never touches the DiT transformer (2.7 GB). The VAE is two files,
+    ~335 MB, each pinned by sha256 in configs/dit_xl2_256.yaml. Both are checked BEFORE
+    torch is imported, so a missing or corrupt download fails fast with the command that
+    fixes it. The load is the same call runner/dit_model.py makes on the cluster.
+    """
+    import os
+    import shlex
+    from runner.config import resolve_path
+
+    entry = cfg["checkpoints"]["vae"]
+    root = resolve_path(entry["path"])
+    files = entry.get("files") or {}
+    if not files:
+        raise SystemExit(f"ERROR: {cfg.get('_path', 'the config')} lists no files under "
+                         f"checkpoints.vae — expected config.json and the .safetensors")
+
+    missing = [f for f in files if not (root / f).is_file()]
+    if missing:
+        lines = [f"ERROR: DiT VAE file(s) missing in {_show(root)}: {', '.join(missing)}",
+                 "       --vae-only needs ONLY these two files (~335 MB), not the 2.7 GB "
+                 "DiT transformer.",
+                 "       From the repo root, run:",
+                 f"       mkdir -p {_show(root)}"]
+        for fname in missing:
+            lines.append(f"       curl -L -o {_show(root / fname)} "
+                         f"{shlex.quote(files[fname]['url'])}")
+        raise SystemExit("\n".join(lines))
+
+    for fname, meta in files.items():
+        want = (meta or {}).get("sha256")
+        if not want:
+            continue
+        got = _sha256(root / fname)
+        if got != want:
+            raise SystemExit(
+                f"ERROR: {_show(root / fname)} is not the pinned file.\n"
+                f"       sha256   {got}\n"
+                f"       expected {want}\n"
+                f"       The download is incomplete or wrong: delete that file and download "
+                f"it again.")
+    print(f"DiT VAE: {len(files)} files present in {_show(root)}, sha256 verified")
+
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")   # load the local folder; never the network
+    import torch
+    # diffusers 0.27.2 reads the weights with `safetensors.torch.load_file` but never imports
+    # `safetensors.torch` itself. On the cluster something else always has: timm (pulled in
+    # by the DiT transformer) and accelerate (in environment.yml). The VAE-only path loads
+    # neither, and environment-macos.yml leaves accelerate out, so without this line the load
+    # fails with "module 'safetensors' has no attribute 'torch'".
+    import safetensors.torch  # noqa: F401
+    from diffusers.models import AutoencoderKL       # as runner/dit_model.py
+
+    dev = torch.device(device or "cpu")
+    print(f"building AutoencoderKL only on {dev} — DiT transformer not loaded")
+    # low_cpu_mem_usage=False is what diffusers falls back to anyway without accelerate;
+    # saying so explicitly just removes its "pip install accelerate" warning. Same weights.
+    vae = AutoencoderKL.from_pretrained(str(root), low_cpu_mem_usage=False).to(dev)
+    vae.eval().requires_grad_(False)
+
+    class _VaeOnly:
+        pass
+    m = _VaeOnly()
+    m.vae, m.device = vae, dev
+    return m
+
+
+def keys_from_pngs(folder):
+    """{(class_id, seed)} named by the PNGs in `folder` (class<c>_seed<s>[...].png)."""
+    import re
+    pat = re.compile(r"^class(\d+)_seed(\d+)(?:_stage\d+)?\.png$")
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise SystemExit(f"ERROR: --keys-like folder not found: {folder}")
+    keys = set()
+    for p in folder.glob("*.png"):
+        m = pat.match(p.name)
+        if m:
+            keys.add((int(m.group(1)), int(m.group(2))))
+    if not keys:
+        raise SystemExit(f"ERROR: no class<N>_seed<N>.png files in {folder}")
+    return keys
 
 
 def spread_across_classes(keys, n):
@@ -219,11 +364,20 @@ def main(argv=None):
                     help="configs/var_d20.yaml or configs/dit_xl2_256.yaml")
     ap.add_argument("--n", type=int, default=5, help="how many images to decode (default 5)")
     ap.add_argument("--vae-only", action="store_true",
-                    help="load just the VQVAE (436 MB, no GPU) instead of the full model")
+                    help="load just the decoder, no GPU: VAR's VQVAE (436 MB) or DiT's "
+                         "AutoencoderKL (~335 MB) — never the transformer")
     ap.add_argument("--device", help="cpu | mps | cuda (default: cpu with --vae-only)")
     ap.add_argument("--first-n", action="store_true",
                     help="take the first n keys in sorted order (one class) instead of "
                          "spreading across classes — almost never what you want")
+    ap.add_argument("--keys-like", type=Path, metavar="DIR",
+                    help="decode exactly the images named in this folder of PNGs "
+                         "(class<c>_seed<s>.png), e.g. for_darien_20_clean_pngs; replaces --n")
+    ap.add_argument("--final-only", action="store_true",
+                    help="decode only the finished image (VAR: scale 9; DiT: timestep 0)")
+    ap.add_argument("--sheet-rows", type=int, default=None, metavar="N",
+                    help="show only the first N images on the contact sheet (every PNG is "
+                         "still written). Useful for DiT: 24 columns x 32 rows is unwieldy")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="default: <stages>/decoded_<model>")
     args = ap.parse_args(argv)
@@ -232,16 +386,34 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
 
     by_stage = load_stage_files(args.stages, args.model)
-    stages = sorted(by_stage)
+    # Generation order: VAR scales count up (0 -> 9); DiT timesteps count DOWN (999 = noise,
+    # 0 = the finished image). Either way the final stage ends up LAST.
+    stages = sorted(by_stage, reverse=(args.model == "dit"))
     available = sorted(set.intersection(*(set(v) for v in by_stage.values())))
     if not available:
         raise SystemExit("ERROR: no (class_id, seed) present at every stage — "
                          "run verify_extraction.py first, a batch is probably missing.")
-    keys = available[:args.n] if args.first_n else spread_across_classes(available, args.n)
+    if args.final_only:
+        stages = stages[-1:]
+
+    if args.keys_like:
+        wanted = keys_from_pngs(args.keys_like)
+        keys = [k for k in available if k in wanted]
+        lost = sorted(wanted - set(available))
+        if not keys:
+            raise SystemExit(f"ERROR: none of the {len(wanted)} images named in "
+                             f"{args.keys_like} are in {args.stages}")
+        if lost:
+            print(f"  WARNING: {len(lost)} of {len(wanted)} images in {args.keys_like} are not "
+                  f"in the stage files, e.g. class {lost[0][0]} seed {lost[0][1]}")
+    elif args.first_n:
+        keys = available[:args.n]
+    else:
+        keys = spread_across_classes(available, args.n)
     ncls = len({k[0] for k in keys})
     print(f"decoding {len(keys)} images x {len(stages)} stages from {args.stages} "
           f"({ncls} class{'es' if ncls != 1 else ''})")
-    if ncls == 1 and len({k[0] for k in available}) > 1:
+    if ncls == 1 and len({k[0] for k in available}) > 1 and not args.keys_like:
         print("  WARNING: all picked images are one class — drop --first-n for a spread")
 
     from runner.config import load_config
@@ -267,12 +439,19 @@ def main(argv=None):
             Image.fromarray(im).save(out / f"class{k[0]:04d}_seed{k[1]}_stage{st:04d}.png")
         print(f"  stage {st} done", flush=True)
 
+    if len(stages) == 1:
+        print(f"\nwrote {len(keys)} final-stage PNGs to {out} (one stage, so no contact sheet)")
+        return
+
     sheet = out / f"contact_{args.model}.png"
     expect = ("coarse -> fine" if args.model == "var" else "noisy -> clean")
-    contact_sheet(rows, stages, keys, sheet,
+    sheet_keys = keys[:args.sheet_rows] if args.sheet_rows else keys
+    contact_sheet(rows, stages, sheet_keys, sheet,
                   f"P3 extraction check — {args.model}: expect {expect} left to right")
 
-    print(f"\nwrote {sheet}")
+    shown = (f" ({len(sheet_keys)} of {len(keys)} images; all {len(keys)} written as PNGs)"
+             if len(sheet_keys) < len(keys) else "")
+    print(f"\nwrote {sheet}{shown}")
     print("\nNOW LOOK AT IT. You are checking three things:")
     print(f"  1. left to right goes {expect}")
     print("  2. the last column matches that image's final baseline PNG")
