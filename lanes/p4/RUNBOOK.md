@@ -121,7 +121,10 @@ same calls use it automatically — nothing to change.
 
 ---
 
-## B. NSCC, on the GPU — **not yet run**
+## B. NSCC, on the GPU
+
+Gate B ran here: smoke 25915819, pilots rerun as VAR 25969141 and DiT 25969145, scored in
+`lanes/p4/results/gate_b/`. Phases C and E use §B5.
 
 Everything below needs an NSCC account and the NTU VPN. `docs/NSCC.md` and `docs/HANDOVER.md` §2 are
 the authority on logging in; this section is only what P4 adds.
@@ -131,7 +134,7 @@ the authority on logging in; this section is only what P4 adds.
 ```bash
 ssh nscc                                       # per docs/HANDOVER.md 2.1
 cd ~/var-scale-audit
-git fetch && git checkout p4/progress-mapping-gate-b
+git fetch && git checkout kmaniar/p4-phase-c-e         # Gate B code: kmaniar/progress-mapping-gate-b
 bash scripts/nscc/setup_login.sh <your-project-id>     # submodules + checkpoints, safe to re-run
 myprojects                                     # note YOUR personal project id
 ```
@@ -225,6 +228,59 @@ Any other `--metric` is drawn as higher-is-better, so add a `MetricSpec` first.
 **Not yet in this runbook, on purpose:** P3's newer stage tools on `main` (`stage_curves.py`,
 `semantic_curve.py`, `agreement.py`, `baseline_audit.py`, `RANKING_SPEC.md`) work on P3's own observed
 runs, not on P4's arm directories. Figure 5 will consume their rankings; nothing in B4 does.
+
+### B5. Phase C and Phase E: the full sweeps
+
+One job per root. Each job generates the baseline and all 27 arms (3 bands × protect/damage/control ×
+3 budgets), checks pairing, scores every run on P3's metrics (`lanes.p4.score`), and drops the raw
+`.pt` tensors. B4's manual steps are not needed for these roots.
+
+**Before submitting, on the login node:**
+
+```bash
+python -m lanes.p2.quality --download       # classifier weights; jobs run with HF_HUB_OFFLINE=1
+ls checkpoints/                             # var_d24 present? if not: bash scripts/nscc/setup_login.sh <project>
+myquota                                     # at least 30 GB free in home before the day-1 batch
+python lanes/p4/check_p4_pilot.py --arms-only   # ends ALL P4 PILOT CHECKS PASS
+```
+
+**The day-1 batch.** All five are independent, so submit them together:
+
+```bash
+P=<your-project-id>
+qsub -P $P lanes/p4/jobs/sweep_var.pbs                                      # Phase C VAR d20   ~30 min
+qsub -P $P lanes/p4/jobs/sweep_dit.pbs                                      # Phase C DiT       ~3.5 h
+qsub -P $P -v SEED=20261070 lanes/p4/jobs/sweep_var.pbs                     # Phase E seed 2
+qsub -P $P -v SEED=20261070 lanes/p4/jobs/sweep_dit.pbs                     # Phase E seed 2
+qsub -P $P -v CONFIG=configs/var_d24.yaml,OUT_TAG=d24 lanes/p4/jobs/sweep_var.pbs   # Phase E d24 (optional)
+qstat -f <JOBID> | grep -i project                                          # check every one
+```
+
+Roots land at `outputs/p4/full/<model>/<tag>/<JOBID>`: tags `seed20261006`, `seed20261070` and `d24`.
+Each job's last line is exactly one of:
+
+```
+P4 SWEEP COMPLETE, PAIRED AND SCORED
+P4 SWEEP FAILED (sweep exit N, pairing exit M, scoring exit K) - do not use these runs
+```
+
+**Why seed 20261070.** Only the control arm depends on the seed. Protect and damage are placed
+deterministically, so in a seed-2 root they re-run bit-identically, which doubles as a determinism
+check. `CONTROL_SEED + 1` is not used: it reproduces one VAR control set (middle, m = 2).
+`check_p4_pilot.py` asserts that every seed-2 control set differs.
+
+**If a job fails:**
+- Scoring only (`scoring exit` non-zero, the others 0): rescore the same root.
+  `qsub -P $P -v ROOTS=<root> lanes/p4/jobs/score.pbs`. It resumes and skips scored runs.
+- Generation or pairing: resubmit the whole job. It writes a new `<JOBID>` root. Never patch a
+  failed root.
+- NSCC down, or queued past 12 h: run `lanes/p4/jobs/smoke_tc2.sh` on TC2, then use the
+  `sweep_*_tc2.sh` twins with the same variables (`SEED=20261070 sbatch --export=ALL ...`). A root
+  holds runs from one machine only; `machine.txt` in each root records which.
+
+**Confirmation runs (Phase D).** Run these only when `lanes/p4/shortlist.py` reports a new candidate
+set. Pass the same scripts `STAGES=<comma list>` and an `OUT_TAG`; the root goes under
+`outputs/p4/confirm/`. Repeat a new set with `SEED=20261070` and on d24 too.
 
 ---
 

@@ -47,6 +47,10 @@ INTERVENED_ARMS = ("protect", "damage", "control")
 # (scripts/phase3/hooks_lib.py restore_all) and the only one whose intent maps onto a removed DiT step.
 VAR_GATE_B_LAMBDA = 0.0
 CONTROL_SEED = 20261006        # fixed, recorded, and reported with every control arm
+# The Phase E second placement seed. Only the control arm reads the seed; protect and damage are
+# placed deterministically. Not CONTROL_SEED + 1: redraws walk successive seeds, so +1 reproduces the
+# VAR middle m = 2 control set. lanes/p4/check_p4_pilot.py asserts every control set differs.
+PHASE_E_SEED = 20261070
 # The environment an arm's VAR hook reads (lanes/p4/hooks.py). Named here so the pilot driver can set
 # them without importing the hook module, which would pull torch into a process that only shells out.
 ENV_STAGES, ENV_LAMBDA, ENV_LOG = "P4_STAGES", "P4_LAMBDA", "P4_LOG"

@@ -470,6 +470,110 @@ def check_score(c: Checks):
         finally:
             score.Scorers = orig
 
+
+# ---------------------------------------------------------------- Phase C/E sweep plans and jobs
+
+def check_sweep_plans(c: Checks):
+    """The second seed moves every control set and nothing else; d24 plans the same sets as d20."""
+    for model in ("var", "dit"):
+        stages = fixtures.frozen_stages(model)
+        for band in bands.BANDS:
+            for m in arms.budget_grid(model, stages, band):
+                one = arms.arm_plan(model, stages, band, m)
+                two = arms.arm_plan(model, stages, band, m, seed=arms.PHASE_E_SEED)
+                tag = f"{model} {band} m={m}"
+                c.that(f"{tag}: the Phase E seed draws a different control set",
+                       one["control"]["stages"] != two["control"]["stages"])
+                c.equal(f"{tag}: protect and damage do not depend on the seed",
+                        (one["protect"]["stages"], one["damage"]["stages"]),
+                        (two["protect"]["stages"], two["damage"]["stages"]))
+    _model, d24 = fixtures.stages_for_config(REPO / "configs" / "var_d24.yaml")
+    manifest = Path("manifest/frozen_v1_1.csv")
+    d20_plan = pilot.plan_full_runs("var", REPO / "configs" / "var_d20.yaml", manifest, Path("/tmp/x"))
+    d24_plan = pilot.plan_full_runs("var", REPO / "configs" / "var_d24.yaml", manifest, Path("/tmp/x"))
+    c.equal("d24 plans the same 28 stage sets as d20 (all depths share 10 scales)",
+            [(r["band"], r["arm"], r["m"], tuple(r["record"]["stages"])) for r in d24_plan],
+            [(r["band"], r["arm"], r["m"], tuple(r["record"]["stages"])) for r in d20_plan])
+    seeded = pilot.plan_full_runs("dit", REPO / "configs" / "dit_xl2_256.yaml", manifest, Path("/tmp/x"),
+                                  seed=arms.PHASE_E_SEED)
+    c.that("plan-full --seed reaches every DiT control arm",
+           all(r["record"]["control_seed"] >= arms.PHASE_E_SEED for r in seeded if r["arm"] == "control"))
+
+
+def _sweep_shim(tmp: Path, pilot_rc: int, pair_rc: int, score_rc: int) -> Path:
+    """A PATH directory whose `python` and `nvidia-smi` stand in for the GPU steps."""
+    shim = tmp / f"shim_{pilot_rc}{pair_rc}{score_rc}"
+    shim.mkdir()
+    (shim / "python").write_text(
+        "#!/bin/bash\n"
+        'echo "python $*" >> "$SHIM_LOG"\n'
+        f'case "$*" in *lanes.p4.pilot*) exit {pilot_rc};; *verify_pairing*) exit {pair_rc};;'
+        f' *lanes.p4.score*) exit {score_rc};; esac\nexit 0\n')
+    (shim / "nvidia-smi").write_text("#!/bin/bash\nexit 0\n")
+    for f in shim.iterdir():
+        f.chmod(0o755)
+    return shim
+
+
+def check_sweep_body(c: Checks):
+    import tempfile
+    body = REPO / "lanes" / "p4" / "jobs" / "sweep_body.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        def run(rcs, job, **env):
+            (tmp / job).mkdir()
+            shim = _sweep_shim(tmp / job, *rcs)
+            log = tmp / job / "calls.log"
+            full_env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}", "SHIM_LOG": str(log),
+                        "MODEL": "var", "JOB": job, "MACHINE": "test", "OUT_ROOT": str(tmp / "out"),
+                        **env}
+            for key in ("CONFIG", "SEED", "OUT_TAG", "STAGES", "KEEP_RAW"):
+                if key not in env:
+                    full_env.pop(key, None)
+            r = subprocess.run(["bash", "-c", f"set -uo pipefail; source {body}"], cwd=REPO,
+                               env=full_env, capture_output=True, text=True)
+            lines = r.stdout.strip().splitlines()
+            return r.returncode, (lines[-1] if lines else r.stderr), \
+                (log.read_text().splitlines() if log.exists() else [])
+
+        rc, last, calls = run((0, 0, 0), "j1")
+        c.equal("a clean sweep ends COMPLETE with exit 0", (rc, last),
+                (0, "P4 SWEEP COMPLETE, PAIRED AND SCORED"))
+        c.equal("the job runs the sweep, then pairing, then scoring",
+                [next(k for k in ("lanes.p4.pilot", "verify_pairing", "lanes.p4.score", "check_third")
+                      if k in call) for call in calls],
+                ["check_third", "lanes.p4.pilot", "verify_pairing", "lanes.p4.score"])
+        c.that("the default sweep is run-full on the frozen manifest at the frozen seed",
+               "run-full" in calls[1] and "manifest/frozen_v1_1.csv" in calls[1]
+               and f"--seed {arms.CONTROL_SEED}" in calls[1], calls[1])
+        c.that("the default root is outputs/p4/full/<model>/seed<SEED>/<job>",
+               (tmp / "out" / "full" / "var" / f"seed{arms.CONTROL_SEED}" / "j1" / "machine.txt").is_file())
+        for rcs, what in (((1, 0, 0), "the sweep lost a run"), ((0, 1, 0), "pairing failed"),
+                          ((0, 0, 1), "scoring failed")):
+            rc, last, calls = run(rcs, f"fail{''.join(map(str, rcs))}")
+            c.that(f"when {what}, the job ends FAILED with exit 1",
+                   rc == 1 and last.startswith("P4 SWEEP FAILED"), f"{rc} {last}")
+            c.that(f"when {what}, scoring still runs", any("lanes.p4.score" in x for x in calls))
+        rc, last, calls = run((0, 0, 0), "j2", SEED=str(arms.PHASE_E_SEED))
+        c.that("SEED reaches the sweep and names the root",
+               f"--seed {arms.PHASE_E_SEED}" in calls[1]
+               and (tmp / "out" / "full" / "var" / f"seed{arms.PHASE_E_SEED}" / "j2").is_dir())
+        rc, last, calls = run((0, 0, 0), "j3", CONFIG="configs/var_d24.yaml", OUT_TAG="d24")
+        c.that("CONFIG and OUT_TAG reach the sweep and the root",
+               "configs/var_d24.yaml" in calls[1] and (tmp / "out" / "full" / "var" / "d24" / "j3").is_dir())
+        rc, last, calls = run((0, 0, 0), "j4", STAGES="2,3,4", OUT_TAG="s234")
+        c.that("STAGES turns the job into a confirmation run under outputs/p4/confirm/",
+               " run --stages 2,3,4 " in f" {calls[1]} "
+               and (tmp / "out" / "confirm" / "var" / "s234" / "j4").is_dir(), calls[1])
+        (tmp / "out" / "full" / "var" / "seed1" / "j5").mkdir(parents=True)
+        (tmp / "out" / "full" / "var" / "seed1" / "j5" / pilot.PLAN_FILE).write_text("{}")
+        rc, last, calls = run((0, 0, 0), "j5", SEED="1")
+        c.that("a root that already holds a sweep is refused, not mixed", rc == 1 and not calls,
+               f"{rc} {calls}")
+        rc, last, calls = run((0, 0, 0), "j6", MODEL="vae")
+        c.that("an unknown MODEL is refused", rc == 1 and not calls)
+
     # --- the job scripts parse
     for script in sorted((REPO / "lanes" / "p4" / "jobs").glob("*")):
         if script.suffix in (".pbs", ".sh"):
@@ -533,6 +637,32 @@ def check_driver(c: Checks, tiny_dir: Path, work: Path):
                            for arm in arms.INTERVENED_ARMS))
             c.that(f"{model} {band}: every arm lives beneath its candidate band",
                    all(Path(r["out_dir"]).parent.name == band for r in band_runs))
+
+    # --- run-full end to end on the tiny models, then the pairing gate over the whole root
+    import contextlib
+    import io
+    full_manifest = work / "full16.csv"
+    full_manifest.write_text("class_id,seed\n" + "".join(f"{c},{s}\n" for c in (207, 208, 360, 361)
+                                                          for s in range(4)))
+    for model, cfg in (("var", tiny_dir / "var_tiny.yaml"), ("dit", tiny_dir / "dit_tiny.yaml")):
+        root = work / f"tiny_full_{model}"
+        shutil.rmtree(root, ignore_errors=True)
+        runs = pilot.plan_full_runs(model, cfg, full_manifest, root)
+        with contextlib.redirect_stdout(io.StringIO()):
+            failures = pilot.run_all(runs, root)
+        c.equal(f"tiny {model}: run-full completes every planned run", failures, 0)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = verify_pairing.main([str(root)])
+        c.that(f"tiny {model}: every planned run is present and paired",
+               rc == 0 and "ALL ARMS PAIRED" in out.getvalue()
+               and f"all {len(runs)} planned runs are present" in out.getvalue(), out.getvalue()[-400:])
+        if model == "var":
+            victim = Path(runs[-1]["out_dir"])
+            shutil.rmtree(victim)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = verify_pairing.main([str(root)])
+            c.that("a sweep missing one arm directory fails the gate",
+                   rc == 1 and "never produced a run.json" in out.getvalue(), out.getvalue()[-400:])
 
     # --- a dry run plans the same work and writes nothing
     dry_root = work / "dry"
@@ -619,7 +749,9 @@ def main(argv=None):
 
     print("== P4 pilot self-check (CPU; proves the mechanics, never a result)")
     skipped = []
-    sections = [("arm construction", check_arms), ("scoring driver and job scripts", check_score)]
+    sections = [("arm construction", check_arms), ("scoring driver", check_score),
+                ("Phase C/E sweep plans", check_sweep_plans),
+                ("sweep job body and job scripts", check_sweep_body)]
     if not args.arms_only:
         sections.append(("VAR hook, called directly", check_hook_unit))
     else:
