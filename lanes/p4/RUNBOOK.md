@@ -278,6 +278,25 @@ check. `CONTROL_SEED + 1` is not used: it reproduces one VAR control set (middle
   `sweep_*_tc2.sh` twins with the same variables (`SEED=20261070 sbatch --export=ALL ...`). A root
   holds runs from one machine only; `machine.txt` in each root records which.
 
+**After the jobs: tables and Figure 4.** CPU only; run on the login node or on the laptop after
+copying the roots. `<V1>`, `<D1>`, `<V2>`, `<D2>` and `<V24>` are the five roots; `S` is the dated
+summary folder.
+
+```bash
+S=outputs/p4/summary/$(date +%F)
+for pair in var_seed1=<V1> dit_seed1=<D1> var_seed2=<V2> dit_seed2=<D2> var_d24=<V24>; do
+    name=${pair%%=*}; root=${pair#*=}
+    python -m lanes.p4.export summary "$root" --out "$S/${name}_summary.csv"
+    python -m lanes.p4.export tidy    "$root" --out "$S/${name}_tidy.csv"
+done
+python -m lanes.p4.figure4_draft <V1> <D1> --metric incep_cos --out "$S/figure4_incep_cos.png"
+python -m lanes.p4.figure4_draft <V1> <D1> --metric cls_prob  --out "$S/figure4_cls_prob.png"
+```
+
+Figure 4 has one panel per model and band. The shading is each arm's 95% CI. Under each title,
+the paired protect − control and damage − control contrasts are listed wherever their CI
+excludes 0. P3's two conditions are printed on the VAR early and middle panels.
+
 **Confirmation runs (Phase D).** Run these only when `lanes/p4/shortlist.py` reports a new candidate
 set. Pass the same scripts `STAGES=<comma list>` and an `OUT_TAG`; the root goes under
 `outputs/p4/confirm/`. Repeat a new set with `SEED=20261070` and on d24 too.

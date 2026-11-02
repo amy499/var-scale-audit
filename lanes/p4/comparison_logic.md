@@ -1,9 +1,10 @@
-# Comparison logic — P3 sign-off needed
+# Comparison logic — signed off by P3
 
-Owner: P4. Status: **waiting on P3**. Deadline: reply within 48 h; the pilot cannot be submitted
-until this is answered, and changing the bands afterwards means re-running the GPU jobs.
+Owner: P4. Status: **signed off by P3, with two conditions** (reply received by 22 Oct; see the record
+below). The bands and the four-arm construction are frozen: changing them now means re-running every
+GPU job.
 
-## What P3 needs to decide
+## What P3 was asked to decide
 
 Three yes/no answers. Everything below this section is the evidence for them.
 
@@ -18,7 +19,7 @@ independence rule requires it — P4's protocol uses predeclared stages and must
 
 | Record | |
 |---|---|
-| Sent to P3 | *(send date not recorded)* |
+| Sent to P3 | before 22 Oct 2026; the exact send date was not recorded |
 | Outcome | **Signed off by P3** (reply received by 22 Oct): yes to all three questions; P3 independently recomputed the VAR token arithmetic (77/680 = 11.32%, 7/2/1 token-mass split). Two conditions added below. |
 
 **Conditions from P3's sign-off**

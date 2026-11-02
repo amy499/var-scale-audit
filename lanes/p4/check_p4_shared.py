@@ -651,6 +651,85 @@ def check_export(c: Checks):
         c.equal("summary, tidy and compare all exit 0 from the CLI", rc, [0, 0, 0])
 
 
+def check_figure4(c: Checks):
+    import tempfile
+
+    from lanes.p4 import figure4_draft as f4, plotting
+    spec_cls = plotting.P3_METRIC_SPECS["cls_prob"]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        var = fixtures.write_sweep_root(tmp / "var", "var", _sweep_value(protect_gap=0.02, damage_gap=-0.03))
+        dit = fixtures.write_sweep_root(tmp / "dit", "dit", _sweep_value())
+        collected = f4.collect(var, "cls_prob") + f4.collect(dit, "cls_prob")
+        spec = f4.figure4_spec(collected, spec_cls)
+        c.equal("a full sweep per model gives six panels (2 models x 3 bands)", len(spec["panels"]), 6)
+        c.equal("... laid out one row per model, one column per band", spec["ncols"], 3)
+        c.that("each panel has the four arms",
+               all([s["label"] for s in p["series"]] == list(("baseline", "protect", "damage", "control"))
+                   for p in spec["panels"]))
+        c.that("every arm series carries a CI at every point",
+               all(len(s["ci"]) == len(s["points"]) for p in spec["panels"] for s in p["series"]))
+        c.equal("panels are ordered model then early / middle / late",
+                [(x["model"], x["band"]) for x in collected],
+                [(m, b) for m in ("var", "dit") for b in bands.BANDS])
+
+        # same arm and budget in two bands: separate panels, never one series
+        early = collected[0]["points"]["protect"]
+        middle = collected[1]["points"]["protect"]
+        c.equal("each band's protect series has one point per budget", (len(early), len(middle)), (3, 3))
+
+        # contrast notes follow the metric's direction
+        c.that("a protect arm above control on a higher-is-better metric is marked better",
+               "protect vs control: 0.10 better" in spec["panels"][0]["title"], spec["panels"][0]["title"])
+        c.that("a damage arm below control is marked worse",
+               "damage vs control: 0.10 worse" in spec["panels"][0]["title"])
+        c.that("an arm equal to control says its CI includes 0",
+               "protect vs control: CI includes 0" in spec["panels"][3]["title"])
+        lower = f4.figure4_spec(f4.collect(var, "incep_cos"), plotting.P3_METRIC_SPECS["incep_cos"])
+        c.that("on a lower-is-better metric, being above control is worse",
+               "protect vs control: 0.10 worse" in lower["panels"][0]["title"], lower["panels"][0]["title"])
+
+        # savings and P3's conditions
+        dit_panels = [p for x, p in zip(collected, spec["panels"]) if x["model"] == "dit"]
+        c.that("DiT panels carry a measured saving per budget",
+               all(x["savings"] and all(s > 0 for s in x["savings"].values())
+                   for x in collected if x["model"] == "dit") and "sampling-time saving" in spec["footnote"])
+        c.that("VAR panels carry the no-saving note",
+               all(not x["savings"] for x in collected if x["model"] == "var")
+               and f4.VAR_NO_SAVING in spec["footnote"])
+        c.equal("the VAR early panel carries P3's floor caveat", spec["panels"][0]["conditions"],
+                [f4.VAR_EARLY_FLOOR])
+        c.equal("the VAR middle panel carries P3's mandatory-control condition",
+                spec["panels"][1]["conditions"], [f4.VAR_MIDDLE_CONTROL])
+        c.that("both conditions are printed on the figure",
+               f4.VAR_EARLY_FLOOR in spec["footnote"] and f4.VAR_MIDDLE_CONTROL in spec["footnote"])
+        c.that("no DiT panel carries a VAR condition", all(not p["conditions"] for p in dit_panels))
+
+        # refusals, naming model and band
+        noctl = fixtures.write_sweep_root(tmp / "noctl", "var", _sweep_value(),
+                                          skip={("late", "control", m) for m in (1, 2, 3)})
+        c.raises("a band missing its control arm is refused",
+                 lambda: f4.collect(noctl, "cls_prob"), "var late band has no runs for arm(s) ['control']",
+                 SystemExit)
+        uneven = fixtures.write_sweep_root(tmp / "uneven", "var", _sweep_value(),
+                                           skip={("early", "protect", 3)})
+        c.raises("a band whose arm misses a budget is refused",
+                 lambda: f4.collect(uneven, "cls_prob"), "budget-matched", SystemExit)
+
+        # a single-band pilot root keeps rendering as one panel per model, in one row
+        pv = fixtures.write_sweep_root(tmp / "pv", "var", _sweep_value(), band_names=("middle",))
+        pd = fixtures.write_sweep_root(tmp / "pd", "dit", _sweep_value(), band_names=("middle",))
+        pilot = f4.figure4_spec(f4.collect(pv, "cls_prob") + f4.collect(pd, "cls_prob"), spec_cls)
+        c.equal("Gate B pilot roots render one panel per model, side by side",
+                (len(pilot["panels"]), pilot["ncols"]), (2, 2))
+
+        for backend in plotting.available_backends():
+            out = f4.figure4([var, dit], tmp / f"f4_{backend}.png", metric="cls_prob", backend=backend)
+            c.that(f"the six-panel Figure 4 renders via {backend}", out.exists() and out.stat().st_size > 5000)
+        out = f4.figure4([pv, pd], tmp / "f4_pilot.png", metric="cls_prob", backend="pillow")
+        c.that("the pilot Figure 4 renders via pillow", out.exists())
+
+
 def check_data_layer_is_dependency_free(c: Checks):
     """Prove the data layer never imports a plotting library, by blocking both and doing the work."""
     import subprocess
@@ -749,6 +828,7 @@ def main(argv=None):
                 ("U3 shared plot template", check_template),
                 ("U4 Figure 5 synthesis frame", check_figure5),
                 ("Phase C export: tidy, paired-CI summary, compare", check_export),
+                ("Figure 4 by model and band, with CIs", check_figure4),
                 ("U3/U4 data layer needs no plotting library", check_data_layer_is_dependency_free)]
     ok = True
     for title, fn in sections:

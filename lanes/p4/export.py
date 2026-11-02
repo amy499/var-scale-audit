@@ -126,7 +126,8 @@ def _values(run: dict, metric: str) -> dict:
 
 # ---------------------------------------------------------------- summary
 
-def summary_rows(data: dict) -> list[dict]:
+def summary_rows(data: dict, metrics=METRICS) -> list[dict]:
+    """The summary rows; `metrics` defaults to P3's pair, and Figure 4 passes the one it draws."""
     model, base = data["model"], data["baseline"]
     base_seconds = base["seconds"]
     by_cond = {}
@@ -141,7 +142,7 @@ def summary_rows(data: dict) -> list[dict]:
         row = {"model": model, "band": run["band"], "arm": run["arm"], "m": run["m"],
                "fraction": round(run["fraction"], 6), "run_dir": run["rel"],
                "boot_n": BOOT_N, "boot_seed": BOOT_SEED, "saving": ""}
-        for metric in METRICS:
+        for metric in metrics:
             values = _values(run, metric)
             _keys_equal(_values(base, metric), values, f"{run['rel']} vs baseline, {metric}")
             ordered = [values[k] for k in sorted(values)]
@@ -161,7 +162,7 @@ def summary_rows(data: dict) -> list[dict]:
             if control is None:
                 raise ExportError(f"{run['rel']}: no control arm at band {band} m={m}; the contrast "
                                   "that decides whether placement matters cannot be computed")
-            for metric in METRICS:
+            for metric in metrics:
                 a, c = _values(run, metric), _values(control, metric)
                 _keys_equal(a, c, f"{run['rel']} vs {control['rel']}, {metric}")
                 diffs = [a[k] - c[k] for k in sorted(a)]

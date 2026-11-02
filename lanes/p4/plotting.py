@@ -425,6 +425,7 @@ def band_label(band: str, note: str) -> str:
 
 def _series_range(panel: dict) -> tuple[float, float]:
     values = [v for s in panel["series"] for _x, v in s["points"]]
+    values += [v for s in panel["series"] for _x, lo, hi in s.get("ci", ()) for v in (lo, hi)]
     if not values:
         return 0.0, 1.0
     lo, hi = min(values), max(values)
@@ -435,13 +436,24 @@ def _series_range(panel: dict) -> tuple[float, float]:
     return lo - span * 0.08, hi + span * 0.22   # extra headroom so the legend does not sit on the data
 
 
+def _grid(spec: dict) -> tuple[int, int]:
+    """(rows, columns) of the panel grid. One row unless the spec sets `ncols`."""
+    n = len(spec["panels"])
+    ncols = max(1, min(spec.get("ncols") or n, n))
+    return -(-n // ncols), ncols
+
+
 def _render_matplotlib(spec: dict, out_path: Path, size) -> Path:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     panels = spec["panels"]
-    fig, axes = plt.subplots(1, len(panels), figsize=(size[0] / 100, size[1] / 100), squeeze=False)
-    for ax, panel in zip(axes[0], panels):
+    nrows, ncols = _grid(spec)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(size[0] / 100, size[1] / 100), squeeze=False)
+    flat = list(axes.flatten())
+    for ax in flat[len(panels):]:
+        ax.set_visible(False)
+    for ax, panel in zip(flat, panels):
         for band, (lo, hi) in spec["bands"].items():
             ax.axvspan(lo, hi, color="#000000", alpha=0.04 if band == "middle" else 0.0)
             ax.axvline(lo, color="#999999", linewidth=0.6, linestyle=":")
@@ -459,19 +471,29 @@ def _render_matplotlib(spec: dict, out_path: Path, size) -> Path:
                        width=width, label=s["label"], color=colour)
             else:
                 ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.4, label=s["label"], color=colour)
+                if s.get("ci"):
+                    ax.fill_between([x for x, _lo, _hi in s["ci"]], [lo for _x, lo, _hi in s["ci"]],
+                                    [hi for _x, _lo, hi in s["ci"]], color=colour, alpha=0.15, linewidth=0)
         ax.set_xlim(*spec["x_range"])
         ax.set_ylim(*_series_range(panel))
         ax.set_xticks([p for p, _l in panel["x_ticks"]])
         ax.set_xticklabels([l for _p, l in panel["x_ticks"]], fontsize=6.5, rotation=45)
         ax.set_xlabel(spec["x_label"], fontsize=7.5)
         ax.set_ylabel(panel["y_label"], fontsize=7.5)
-        ax.set_title(panel["title"], fontsize=9, pad=26)   # clears the band labels at y = 1.01
+        import textwrap
+        chars = max(30, int(size[0] / ncols / 7.5))     # ~7.5 px per character at 8 pt, 100 dpi, with margins
+        title = "\n".join(textwrap.fill(line, chars) for line in panel["title"].split("\n"))
+        ax.set_title(title, fontsize=8 if "\n" in title else 9,
+                     pad=26 if spec["bands"] else 6)   # clears the band labels at y = 1.01
         ax.tick_params(labelsize=7)
         if panel["series"]:
             ax.legend(fontsize=7, loc="best", framealpha=0.85)
     fig.suptitle(spec["title"], fontsize=11)
-    fig.text(0.5, 0.005, spec["footnote"], ha="center", fontsize=6.5, color="#555555")
-    fig.tight_layout(rect=(0, 0.03, 1, 0.9))
+    foot_lines = spec["footnote"].count("\n") + 1
+    foot = min(0.4, foot_lines * 0.11 / size[1] * 100)
+    fig.text(0.5, 0.005, spec["footnote"], ha="center", va="bottom", fontsize=6.5, color="#555555",
+             wrap=True)
+    fig.tight_layout(rect=(0, foot + 0.01, 1, 0.94 if nrows > 1 else 0.9))
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path
@@ -485,6 +507,22 @@ def _font(size: int):
         return ImageFont.load_default()
 
 
+def _wrap(d, text: str, font, width: float) -> list[str]:
+    """`text` broken into lines that fit `width` pixels, keeping its own line breaks."""
+    out = []
+    for paragraph in text.split("\n"):
+        line = ""
+        for word in paragraph.split(" "):
+            trial = f"{line} {word}" if line else word
+            if line and d.textlength(trial, font=font) > width:
+                out.append(line)
+                line = word
+            else:
+                line = trial
+        out.append(line)
+    return out
+
+
 def _render_pillow(spec: dict, out_path: Path, size) -> Path:
     """The fallback renderer: Pillow is in both env files, matplotlib is in neither."""
     from PIL import Image, ImageDraw
@@ -494,14 +532,22 @@ def _render_pillow(spec: dict, out_path: Path, size) -> Path:
     d = ImageDraw.Draw(img)
     f_small, f_mid, f_title = _font(10), _font(11), _font(14)
     d.text((10, 6), spec["title"], fill="black", font=f_title)
-    d.text((10, H - 14), spec["footnote"], fill="#555555", font=f_small)
+    foot_lines = _wrap(d, spec["footnote"], f_small, W - 20)
+    for i, line in enumerate(foot_lines):
+        d.text((10, H - 14 * (len(foot_lines) - i)), line, fill="#555555", font=f_small)
 
+    nrows, ncols = _grid(spec)
     pad_l, pad_r, pad_t, pad_b = 62, 14, 70, 64
-    panel_w = (W - (len(panels) - 1) * 26) / len(panels)
+    top, bottom = 24, 14 * len(foot_lines)
+    panel_w = (W - (ncols - 1) * 26) / ncols
+    panel_h = (H - top - bottom) / nrows
+    # Every cell keeps room for the longest wrapped panel title, so titles never climb into the row above.
+    title_room = 13 * (max(len(_wrap(d, p["title"], f_mid, panel_w - pad_r - 10)) for p in panels) - 1)
     for pi, panel in enumerate(panels):
-        x0 = pi * (panel_w + 26) + pad_l
-        x1 = pi * (panel_w + 26) + panel_w - pad_r
-        y0, y1 = pad_t, H - pad_b
+        row, col = divmod(pi, ncols)
+        x0 = col * (panel_w + 26) + pad_l
+        x1 = col * (panel_w + 26) + panel_w - pad_r
+        y0, y1 = top + row * panel_h + pad_t - 24 + title_room, top + (row + 1) * panel_h - pad_b
         lo, hi = _series_range(panel)
 
         xlo, xhi = spec["x_range"]
@@ -521,7 +567,11 @@ def _render_pillow(spec: dict, out_path: Path, size) -> Path:
             d.text(((px(blo) + px(bhi)) / 2 - 3.0 * len(label) / 2, y0 - 30), label,
                    fill="#444444", font=f_small)
         d.rectangle([x0, y0, x1, y1], outline="#333333")
-        d.text((x0, y0 - 50), panel["title"], fill="black", font=f_mid)
+        title_lines = _wrap(d, panel["title"], f_mid, x1 - x0 + pad_l - 10)
+        for li, line in enumerate(title_lines):
+            # above the band labels (drawn at y0 - 30) when the panel has bands
+            d.text((x0 - pad_l + 10, y0 - (37 if spec["bands"] else 20) - 13 * (len(title_lines) - li)),
+                   line, fill="black", font=f_mid)
         d.text((x0, y1 + 32), spec["x_label"], fill="#333333", font=f_small)
         d.text((max(2, x0 - 56), y0 - 16), panel["y_label"], fill="#333333", font=f_small)
         for value in (lo, (lo + hi) / 2, hi):
@@ -540,6 +590,8 @@ def _render_pillow(spec: dict, out_path: Path, size) -> Path:
                 for cx, cy in pts:
                     d.rectangle([cx + off - half, cy, cx + off + half, y1], fill=colour)
             else:
+                for cx, lo_v, hi_v in s.get("ci", ()):
+                    d.line([px(cx) + i - 1, py(lo_v), px(cx) + i - 1, py(hi_v)], fill=colour, width=1)
                 if len(pts) > 1:
                     d.line(pts, fill=colour, width=2)
                 for cx, cy in pts:
