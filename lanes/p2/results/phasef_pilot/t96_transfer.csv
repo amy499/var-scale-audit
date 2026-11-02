@@ -1,0 +1,17 @@
+image,file,psnr,hf_ratio
+ocd01_x100.png,class0000_seed0,23.149,0.9814
+ocd02_x100.png,class0000_seed1,23.793,1.1788
+ocd03_x100.png,class0000_seed2,21.882,1.032
+ocd04_x100.png,class0000_seed3,25.395,1.2428
+ocd05_x100.png,class0000_seed4,24.187,0.746
+ocd06_x100.png,class0000_seed5,28.17,0.7504
+ocd07_x100.png,class0000_seed6,27.922,0.6923
+ocd08_x100.png,class0000_seed7,21.874,1.0082
+ocd09_x400.png,class0000_seed8,27.026,0.9876
+ocd10_x400.png,class0000_seed9,23.044,0.8313
+ocd11_x400.png,class0000_seed10,24.326,1.1403
+ocd12_x400.png,class0000_seed11,22.137,0.8099
+ocd13_x400.png,class0000_seed12,21.335,0.7616
+ocd14_x400.png,class0000_seed13,21.328,0.9513
+ocd15_x400.png,class0000_seed14,27.98,0.7617
+ocd16_x400.png,class0000_seed15,19.434,1.0804
