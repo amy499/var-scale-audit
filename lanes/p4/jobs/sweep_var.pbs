@@ -11,6 +11,7 @@
 #     qsub -P <your-project-id> lanes/p4/jobs/sweep_var.pbs                                  # Phase C
 #     qsub -P <your-project-id> -v SEED=20261070 lanes/p4/jobs/sweep_var.pbs                 # Phase E seed 2
 #     qsub -P <your-project-id> -v CONFIG=configs/var_d24.yaml,OUT_TAG=d24 lanes/p4/jobs/sweep_var.pbs
+#     qsub -P <your-project-id> -l walltime=05:00:00 -v POOL=1 lanes/p4/jobs/sweep_var.pbs  # pooled control
 # then confirm:  qstat -f <JOBID> | grep -i project     (qdel if it is not your project)
 # Overrides (CONFIG, SEED, OUT_TAG, STAGES, MANIFEST, KEEP_RAW) are documented in sweep_body.sh.
 # Ends with exactly one of: P4 SWEEP COMPLETE, PAIRED AND SCORED   /   P4 SWEEP FAILED (...)

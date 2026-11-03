@@ -8,11 +8,14 @@ model, as everything that touches both models must (runner/upstream.py).
     python -m lanes.p4.pilot plan-full --model var
     python -m lanes.p4.pilot run-full --model var --manifest manifest/<frozen>.csv \
         --out-root outputs/p4/full_var/$JOB
+    python -m lanes.p4.pilot plan-pool --model var
 
 `plan` / `run` make the 10-run Gate B pilot for one band. `plan-full` / `run-full` make the
 Phase C predeclared sweep: one no-hook baseline plus protect, damage and control across every frozen
-band and budget. The baseline is always produced first; every arm shares its config, manifest and
-batch size 16 (docs/HANDOVER.md section 3).
+band and budget. `plan-pool` / `run-pool` (VAR only) run every control placement once: the pooled
+control that lanes/p4/export.py `--control-pool` averages (arms.control_pool says why). The baseline
+is always produced first; every arm shares its config, manifest and batch size 16
+(docs/HANDOVER.md section 3).
 
 VAR arms are hooked runs (lanes/p4/hooks.py, lambda = 0); DiT arms are `--skip-timesteps` runs over
 an arm's stage set. `run.json` does not record this repo's branch, so each run directory also gets a
@@ -36,7 +39,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from lanes.p4 import arms, bands, fixtures  # noqa: E402
+from lanes.p4 import arms, bands, fixtures, progress  # noqa: E402
 
 DEFAULT_MANIFEST = "manifest/provisional_4x4.csv"
 BATCH_SIZE = 16                      # one batch size per experiment (docs/HANDOVER.md section 3)
@@ -131,6 +134,47 @@ def plan_full_runs(model: str, config: Path, manifest: Path, out_root: Path,
     return runs
 
 
+POOL_BAND = "pool"
+
+
+def pool_key(band: str, m: int) -> str:
+    return f"{band}:{m}"
+
+
+def plan_pool_runs(model: str, config: Path, manifest: Path, out_root: Path,
+                   fractions=arms.FRACTIONS, band_names=bands.BANDS) -> tuple[list[dict], dict]:
+    """The pooled VAR control (arms.control_pool): one baseline, then every placement of every window
+    structure the frozen bands' budgets use, each run once however many (band, m) pools share it.
+
+    Returns (runs, pools), where pools maps "band:m" to its placements; run_all records it in the plan
+    file. lanes/p4/export.py re-derives each pool from the sweep root it is pooling, so a confirmation
+    window is pooled from the same runs.
+    """
+    stages = _stages_for(model, config)
+    ordered = [row["stage"] for row in bands.assign_bands(progress.map_stages(model, stages))]
+    pools = {}
+    for band in band_names:
+        for m in arms.budget_grid(model, stages, band, fractions):
+            pools[pool_key(band, m)] = [list(s) for s in arms.control_pool(model, stages, band, m)]
+    # Every placement of every window structure the pools use, not only the pools' members: the two
+    # sets a pool excludes (that condition's protect and damage) are members of another candidate's
+    # pool, so with them a shortlisted confirmation window reuses this root instead of needing its own.
+    structures = {arms.arm_plan(model, stages, band, m)["damage"]["windows"]
+                  for band in band_names for m in arms.budget_grid(model, stages, band, fractions)}
+    distinct = sorted({p for lengths in structures for p in arms.placements(model, stages, lengths)},
+                      key=lambda s: (len(s), s))
+    baseline = {**arms.arm_plan(model, stages, band_names[0], 1)[arms.BASELINE], "band": "all",
+                "k": len(stages)}
+    runs = [_baseline_run(config, manifest, out_root, baseline)]
+    for chosen in distinct:
+        record = arms.arm_record(model, "control", POOL_BAND, chosen, ordered, len(ordered),
+                                 arms.VAR_GATE_B_LAMBDA, None)
+        runs.append(_intervention_run(model, config, manifest,
+                                      out_root / POOL_BAND / f"control_{arms.candidate_label(chosen)}",
+                                      POOL_BAND, len(chosen), "control", record))
+    return runs, pools
+
+
 def clean_env(extra: dict | None = None) -> dict:
     """The environment a generate call runs in: this process's, minus any stale arm variables."""
     extra = extra or {}
@@ -168,7 +212,7 @@ def describe(runs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def run_all(runs: list[dict], out_root: Path, dry_run: bool = False) -> int:
+def run_all(runs: list[dict], out_root: Path, dry_run: bool = False, pools: dict | None = None) -> int:
     if not dry_run:
         out_root.mkdir(parents=True, exist_ok=True)
     commit = git_describe()
@@ -178,14 +222,16 @@ def run_all(runs: list[dict], out_root: Path, dry_run: bool = False) -> int:
         # Without this a partial pilot is indistinguishable from a complete one.
         head = runs[0]["record"]
         band_names = tuple(dict.fromkeys(r["band"] for r in runs[1:]))
-        (out_root / PLAN_FILE).write_text(json.dumps(
-            {"kind": "full" if len(band_names) > 1 else "pilot", "model": head["model"],
-             "band": band_names[0] if len(band_names) == 1 else None, "bands": list(band_names),
-             "batch_size": BATCH_SIZE, "code_commit": commit,
-             "control_seed": runs[-1]["record"].get("control_seed"),
-             "runs": [{"arm": r["arm"], "m": r["m"],
-                       "out_dir": Path(r["out_dir"]).relative_to(out_root).as_posix()} for r in runs]},
-            indent=2))
+        kind = "pool" if pools is not None else "full" if len(band_names) > 1 else "pilot"
+        plan = {"kind": kind, "model": head["model"],
+                "band": band_names[0] if len(band_names) == 1 else None, "bands": list(band_names),
+                "batch_size": BATCH_SIZE, "code_commit": commit,
+                "control_seed": runs[-1]["record"].get("control_seed"),
+                "runs": [{"arm": r["arm"], "m": r["m"],
+                          "out_dir": Path(r["out_dir"]).relative_to(out_root).as_posix()} for r in runs]}
+        if pools is not None:
+            plan["pools"] = pools
+        (out_root / PLAN_FILE).write_text(json.dumps(plan, indent=2))
     failures = 0
     for i, r in enumerate(runs, 1):
         out_dir = Path(r["out_dir"])
@@ -222,7 +268,7 @@ def run_all(runs: list[dict], out_root: Path, dry_run: bool = False) -> int:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("action", choices=("plan", "run", "plan-full", "run-full"))
+    ap.add_argument("action", choices=("plan", "run", "plan-full", "run-full", "plan-pool", "run-pool"))
     ap.add_argument("--model", required=True, choices=("var", "dit"))
     ap.add_argument("--band", default="middle", choices=bands.BANDS,
                     help="candidate band for plan/run; plan-full/run-full use every frozen band")
@@ -238,8 +284,19 @@ def main(argv=None):
 
     config = args.config or fixtures.CONFIGS[args.model]
     is_full = args.action.endswith("-full")
-    out_root = args.out_root or REPO / "outputs" / "p4" / ("full" if is_full else "pilot") / args.model
-    if is_full:
+    is_pool = args.action.endswith("-pool")
+    if args.stages and (is_full or is_pool):
+        ap.error("--stages selects one candidate set; use it with plan/run, not the full sweep or pool")
+    kind = "full" if is_full else "pool" if is_pool else "pilot"
+    out_root = args.out_root or REPO / "outputs" / "p4" / kind / args.model
+    pools = None
+    if is_pool:
+        try:
+            runs, pools = plan_pool_runs(args.model, config, args.manifest, out_root,
+                                         fractions=tuple(args.fractions))
+        except arms.ArmError as e:
+            ap.error(str(e))
+    elif is_full:
         runs = plan_full_runs(args.model, config, args.manifest, out_root,
                               fractions=tuple(args.fractions), seed=args.seed)
     else:
@@ -252,11 +309,12 @@ def main(argv=None):
         runs = plan_runs(args.model, candidate, config, args.manifest, out_root,
                          fractions=tuple(args.fractions), seed=args.seed)
     print(describe(runs))
-    if args.stages and is_full:
-        ap.error("--stages selects one candidate set; use it with plan/run, not plan-full/run-full")
+    if pools is not None:
+        print(f"pooled control: {len(runs) - 1} distinct placements cover "
+              + ", ".join(f"{k} ({len(v)})" for k, v in pools.items()))
     if args.action.startswith("plan"):
         return 0
-    return 1 if run_all(runs, out_root, dry_run=args.dry_run) else 0
+    return 1 if run_all(runs, out_root, dry_run=args.dry_run, pools=pools) else 0
 
 
 if __name__ == "__main__":

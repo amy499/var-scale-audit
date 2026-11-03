@@ -4,6 +4,7 @@ Run from the repo root. Standard library only; reads what lanes/p4/pilot.py and 
 
     python -m lanes.p4.export tidy    ROOT --out outputs/p4/summary/<date>/<model>_<tag>_tidy.csv
     python -m lanes.p4.export summary ROOT --out outputs/p4/summary/<date>/<model>_<tag>_summary.csv
+    python -m lanes.p4.export summary ROOT --control-pool POOL_ROOT --out .../var_<tag>_pooled_summary.csv
     python -m lanes.p4.export compare seed1=S1.csv seed2=S2.csv d24=D24.csv \
         --out outputs/p4/summary/<date>/robustness_compare.csv
 
@@ -17,6 +18,10 @@ matters, and it is the one Figure 4 and the report quote.
 The bootstrap draws BOOT_N resamples of the images, seeded from BOOT_SEED and the condition's name,
 so re-running gives byte-identical output. Both are written into every row.
 
+**--control-pool POOL** (VAR): each control arm becomes the per-image mean over every placement in its
+pool (lanes/p4/pilot.py run-pool, arms.control_pool), so the contrast no longer depends on which scales
+one random draw hit. The control row's run_dir names the pool and its size.
+
 **compare** reads summary CSVs (the first is the reference) and writes, per contrast present in the
 reference, both estimates, whether their signs agree and whether their CIs overlap. A disagreement is a
 result to report, never a reason to re-tune.
@@ -27,6 +32,7 @@ dropped image would quietly change what the contrast compares.
 
 import argparse
 import csv
+import itertools
 import json
 import random
 import sys
@@ -39,6 +45,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from lanes.p4 import arms, bands, plotting, progress  # noqa: E402
+from lanes.p4.pilot import PLAN_FILE, pool_key  # noqa: E402
 from lanes.p4.verify_pairing import find_runs  # noqa: E402
 
 METRICS = ("incep_cos", "cls_prob")
@@ -94,6 +101,82 @@ def load_root(root) -> dict:
                      "seconds": (record.get("seconds") or {}).get("sample")})
     model = progress.model_of(progress.load_run(baseline))
     return {"root": root, "model": model, "baseline": runs[0], "arms": runs[1:]}
+
+
+# ---------------------------------------------------------------- the pooled control (VAR)
+
+def load_pool(pool_root) -> dict:
+    """A pooled-control root (lanes/p4/pilot.py run-pool): its scored runs, keyed by stage set."""
+    pool_root = Path(pool_root)
+    plan_path = pool_root / PLAN_FILE
+    plan = json.loads(plan_path.read_text()) if plan_path.is_file() else {}
+    if plan.get("kind") != "pool":
+        raise ExportError(f"{pool_root} is not a pooled-control root (its {PLAN_FILE} is not kind 'pool'); "
+                          "make one with: python -m lanes.p4.pilot run-pool --model var")
+    data = load_root(pool_root)
+    return {"data": data, "by_stages": {tuple(sorted(run["stages"])): run for run in data["arms"]}}
+
+
+def pool_members(data: dict, band: str, m: int) -> list[tuple[int, ...]]:
+    """Every control placement for one (band, m) of a VAR sweep or confirmation root, from its own runs.
+
+    The same rule as arms.control_pool, read from what the root actually ran: every set of m scales
+    with the damage arm's window structure, minus that condition's protect and damage sets. Reading it
+    from the root, not from the pool's plan, is what lets a confirmation set (`s1+2+3`) reuse the pool.
+    VAR scale ids are their positions, so window structure is computed on the ids directly.
+    """
+    cond = {r["arm"]: r for r in data["arms"] if r["band"] == band and r["m"] == m}
+    if "damage" not in cond:
+        raise ExportError(f"band {band} m={m} has no damage arm, so its control structure is unknown")
+    n = len(progress.load_run(data["baseline"]["dir"]).get("stages", []))
+    lengths = arms.window_lengths(sorted(cond["damage"]["stages"]))
+    excluded = {tuple(sorted(cond[a]["stages"])) for a in ("protect", "damage") if a in cond}
+    return [c for c in itertools.combinations(range(n), m)
+            if arms.window_lengths(list(c)) == lengths and c not in excluded]
+
+
+def pool_controls(data: dict, pool: dict, metrics=METRICS) -> dict:
+    """`data` with each control arm replaced by the per-image mean over all its placements (VAR).
+
+    Refused unless the pool's baseline images are the sweep's (tensor hashes in run.json: same model,
+    manifest and code), every placement has a scored run in the pool, and the sweep's own drawn control
+    is one of the placements (both follow the same rule).
+    """
+    pdata = pool["data"]
+    if pdata["model"] != data["model"] or data["model"] != "var":
+        raise ExportError(f"the pooled control is VAR-only and needs a VAR pool; got a {pdata['model']} pool "
+                          f"for a {data['model']} root")
+
+    def image_hashes(run):
+        return {(r["class_id"], r["seed"]): r.get("tensor_sha256")
+                for r in progress.load_run(run["dir"]).get("rows", [])}
+    if image_hashes(pdata["baseline"]) != image_hashes(data["baseline"]):
+        raise ExportError("the pool's baseline images differ from the sweep's (tensor hashes in run.json): "
+                          "they were not generated from the same model, manifest and code, so their "
+                          "arms are not comparable")
+    arms_out = []
+    for run in data["arms"]:
+        if run["arm"] != "control":
+            arms_out.append(run)
+            continue
+        key = pool_key(run["band"], run["m"])
+        sets = pool_members(data, run["band"], run["m"])
+        if tuple(sorted(run["stages"])) not in sets:
+            raise ExportError(f"{run['rel']}: the drawn control {sorted(run['stages'])} is not one of the "
+                              f"{len(sets)} placements of {key}; it was planned by a different rule")
+        missing = [s for s in sets if s not in pool["by_stages"]]
+        if missing:
+            raise ExportError(f"pool {key}: {len(missing)} placement(s) have no run, e.g. {list(missing[0])}")
+        members = [pool["by_stages"][s] for s in sets]
+        pooled = {}
+        for metric in metrics:
+            tables = [_values(member, metric) for member in members]
+            for member, table in zip(members, tables):
+                _keys_equal(_values(run, metric), table, f"pool {member['rel']} vs {run['rel']}, {metric}")
+            pooled[metric] = {k: sum(t[k] for t in tables) / len(tables) for k in tables[0]}
+        arms_out.append({**run, "metrics": pooled, "stages": [], "seconds": None,
+                         "rel": f"pool:{key} ({len(sets)} placements)"})
+    return {**data, "arms": arms_out}
 
 
 # ---------------------------------------------------------------- statistics
@@ -266,16 +349,22 @@ def main(argv=None):
         p = sub.add_parser(name)
         p.add_argument("root", type=Path)
         p.add_argument("--out", type=Path, required=True)
+        p.add_argument("--control-pool", type=Path,
+                       help="a VAR run-pool root: each control becomes the mean over all its placements")
     p = sub.add_parser("compare")
     p.add_argument("summaries", nargs="+", help="LABEL=SUMMARY.csv; the first is the reference")
     p.add_argument("--out", type=Path, required=True)
     args = ap.parse_args(argv)
 
+    if args.action in ("tidy", "summary"):
+        data = load_root(args.root)
+        if args.control_pool:
+            data = pool_controls(data, load_pool(args.control_pool))
     if args.action == "tidy":
-        rows = tidy_rows(load_root(args.root))
+        rows = tidy_rows(data)
         plotting.write_tidy(rows, args.out)
     elif args.action == "summary":
-        rows = summary_rows(load_root(args.root))
+        rows = summary_rows(data)
         write_rows(rows, SUMMARY_COLUMNS, args.out)
     else:
         pairs = []

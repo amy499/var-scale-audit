@@ -239,7 +239,7 @@ One job per root. Each job generates the baseline and all 27 arms (3 bands × pr
 
 ```bash
 python -m lanes.p2.quality --download       # classifier weights; jobs run with HF_HUB_OFFLINE=1
-ls checkpoints/                             # var_d24 present? if not: bash scripts/nscc/setup_login.sh <project>
+ls -lh checkpoints/var/var_d24.pth          # if missing: python scripts/download_checkpoints.py --configs configs/var_d24.yaml
 myquota                                     # at least 30 GB free in home before the day-1 batch
 python lanes/p4/check_p4_pilot.py --arms-only   # ends ALL P4 PILOT CHECKS PASS
 ```
@@ -297,6 +297,41 @@ Figure 4 has one panel per model and band. The shading is each arm's 95% CI. Und
 the paired protect − control and damage − control contrasts are listed wherever their CI
 excludes 0. P3's two conditions are printed on the VAR early and middle panels.
 
+**The pooled VAR control (added 3 Nov, after the seed-2 check).** The seed-2 repeat flipped most VAR
+protect/damage-vs-control contrasts: VAR's 10 scales differ so much in importance that one random
+control draw mostly measures which scales it hit, and the CIs (over images) do not include that luck.
+DiT's repeat agreed everywhere. The fix is to run **every** VAR control placement once and use their
+per-image mean as the control (`arms.control_pool`): the exact expectation of a random draw. That is
+110 runs per VAR model (every placement of the four window structures the budgets use), so give the
+job 5 h. The pool also covers any shortlisted VAR window of 3 or 4 scales, so confirmation runs need no
+pool of their own.
+
+```bash
+qsub -P $P -l walltime=05:00:00 -v POOL=1 lanes/p4/jobs/sweep_var.pbs                                # d20
+qsub -P $P -l walltime=05:00:00 -v "POOL=1,CONFIG=configs/var_d24.yaml" lanes/p4/jobs/sweep_var.pbs  # d24
+```
+
+Roots land at `outputs/p4/pool/var/var_d20/<JOBID>` and `.../var_d24/<JOBID>` and end with the same
+COMPLETE line. Then re-export VAR against its pool (`<P20>`, `<P24>` are the pool roots):
+
+```bash
+for pair in var_seed1=<V1>,<P20> var_d24=<V24>,<P24>; do
+    name=${pair%%=*}; roots=${pair#*=}; root=${roots%,*}; pool=${roots#*,}
+    python -m lanes.p4.export summary "$root" --control-pool "$pool" --out "$S/${name}_pooled_summary.csv"
+    python -m lanes.p4.export tidy    "$root" --control-pool "$pool" --out "$S/${name}_pooled_tidy.csv"
+done
+python -m lanes.p4.export compare d20="$S/var_seed1_pooled_summary.csv" d24="$S/var_d24_pooled_summary.csv" \
+    --out "$S/robustness_var_pooled.csv"
+for metric in incep_cos cls_prob; do
+    python -m lanes.p4.figure4_draft <V1> <D1> --control-pool var=<P20> --metric $metric \
+        --out "$S/figure4_${metric}_pooled.png"
+done
+```
+
+The pooled control rows name their pool (`pool:middle:2 (34 placements)`). The seed-2 VAR root is kept
+as the evidence for the change, not as a result. A confirmation root on a shortlisted VAR window is
+exported the same way, with `--control-pool <P20>`.
+
 **Phase D: snapshot, Figure 5 and the shortlist.** CPU only. Take the snapshot after P3's deadline
 (Tue 3 Nov 18:00), so that P3's CSVs are in it if they were committed.
 
@@ -304,17 +339,20 @@ excludes 0. P3's two conditions are printed on the VAR early and middle panels.
 H=outputs/p4/handoff/$(date +%F)
 python -m lanes.p4.synthesis snapshot --out "$H"            # P1 @ origin/p1/stage-removal, P2/P3 @ origin/main
 python -m lanes.p4.synthesis figure5 "$H" --out-dir "$S" \
-    --p4-summary var="$S/var_seed1_summary.csv" --p4-summary dit="$S/dit_seed1_summary.csv"
+    --p4-summary var="$S/var_seed1_pooled_summary.csv" --p4-summary dit="$S/dit_seed1_summary.csv"
+# before the VAR pool exists, use var_seed1_summary.csv and re-run this line once it does
 python -m lanes.p4.shortlist "$H" --out-dir "$S"            # P1-P3 only; prints the verdict per model
 ```
 
 `shortlist_<model>.json` records the winning window, the lanes used and excluded, the pairwise
 agreement and the verdict. `covered by <band>` means the Phase C sweep already ran that exact set,
-so there are no runs to submit. `new candidate set` prints the three `qsub` lines to run.
+so there are no runs to submit. `new candidate set` prints the `qsub` lines to run (VAR: d20 and d24).
 
 **Confirmation runs (Phase D).** Run these only when `lanes/p4/shortlist.py` reports a new candidate
 set. Pass the same scripts `STAGES=<comma list>` and an `OUT_TAG`; the root goes under
-`outputs/p4/confirm/`. Repeat a new set with `SEED=20261070` and on d24 too.
+`outputs/p4/confirm/`. Repeat a new set on d24 too. For VAR, export it with `--control-pool` (the
+d20 or d24 pool root), which makes the `SEED=20261070` repeat unnecessary: only the control depends
+on the seed, and the pool already averages over every placement.
 
 ---
 

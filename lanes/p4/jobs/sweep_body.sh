@@ -10,10 +10,13 @@
 #   OUT_TAG   names the root          default: seed<SEED>; use d24 for the VAR d24 repeat
 #   STAGES    comma-separated stage set: a confirmation run (lanes/p4/shortlist.py) instead of the
 #             full sweep; the root goes under outputs/p4/confirm/
+#   POOL      1 runs the pooled VAR control instead (lanes/p4/pilot.py run-pool: every control
+#             placement once, ~109 runs, give the job a 5 h walltime); the root goes under
+#             outputs/p4/pool/ and OUT_TAG defaults to the config name (var_d20, var_d24)
 #   MANIFEST  default: manifest/frozen_v1_1.csv
 #   KEEP_RAW  1 keeps the .pt tensors (default 0: dropped once scored, the 50 GB quota rule)
 #
-# Roots: outputs/p4/full/<model>/<OUT_TAG>/<JOB> or outputs/p4/confirm/<model>/<OUT_TAG>/<JOB>.
+# Roots: outputs/p4/{full,confirm,pool}/<model>/<OUT_TAG>/<JOB>.
 # One root never holds runs from two machines (MACHINE is recorded in machine.txt).
 
 case "$MODEL" in
@@ -23,12 +26,24 @@ case "$MODEL" in
 esac
 CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
 SEED="${SEED:-20261006}"
-OUT_TAG="${OUT_TAG:-seed$SEED}"
+POOL="${POOL:-0}"
+if [[ "$POOL" == 1 ]]; then
+    CONFIG_NAME="${CONFIG##*/}"
+    OUT_TAG="${OUT_TAG:-${CONFIG_NAME%.yaml}}"
+else
+    OUT_TAG="${OUT_TAG:-seed$SEED}"
+fi
 MANIFEST="${MANIFEST:-manifest/frozen_v1_1.csv}"
 STAGES="${STAGES:-}"
 export KEEP_RAW="${KEEP_RAW:-0}"
 
-if [[ -n "$STAGES" ]]; then
+if [[ "$POOL" == 1 && -n "$STAGES" ]]; then
+    echo "POOL=1 and STAGES are separate jobs; set one" >&2
+    exit 1
+elif [[ "$POOL" == 1 ]]; then
+    KIND=pool
+    ACTION=(run-pool)
+elif [[ -n "$STAGES" ]]; then
     KIND=confirm
     ACTION=(run --stages "$STAGES")
 else

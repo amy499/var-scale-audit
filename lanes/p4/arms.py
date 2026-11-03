@@ -26,6 +26,7 @@ at `k / n` -- 0.3 for VAR-d20, 0.332 for the 250-step DiT schedule.
 """
 
 import argparse
+import itertools
 import random
 import sys
 
@@ -56,6 +57,7 @@ PHASE_E_SEED = 20261070
 ENV_STAGES, ENV_LAMBDA, ENV_LOG = "P4_STAGES", "P4_LAMBDA", "P4_LOG"
 ARM_ENV = (ENV_STAGES, ENV_LAMBDA, ENV_LOG)
 REDRAW_ATTEMPTS = 64           # successive seeds tried before a control arm is called degenerate
+POOL_MAX = 200                 # placements one pooled control may hold; VAR-d20's largest is 54
 FRACTIONS = (0.1, 0.2, 0.3)    # the swept reduction budgets, as a fraction of all native stages
 
 
@@ -260,6 +262,47 @@ def arm_plan(model: str, stages, band, m: int, *, seed: int = CONTROL_SEED,
            for arm in ARMS}
     out["control"]["degenerate"] = degenerate
     return out
+
+
+def placements(model: str, stages, lengths) -> list[tuple[int, ...]]:
+    """Every set of eligible stages whose merged windows have exactly these `lengths`, sorted."""
+    mapped = bands.assign_bands(progress.map_stages(model, stages))
+    ordered = [row["stage"] for row in mapped]
+    position = {stage: i for i, stage in enumerate(ordered)}
+    out = []
+    for combo in itertools.combinations([position[s] for s in eligible(model, ordered)], sum(lengths)):
+        if window_lengths(list(combo)) == tuple(lengths):
+            out.append(tuple(sorted(ordered[p] for p in combo)))
+    return sorted(out)
+
+
+def control_pool(model: str, stages, band, m: int) -> list[tuple[int, ...]]:
+    """Every control placement at this band and budget: the pooled control (VAR only).
+
+    The control arm asks "would any m stages do the same?". One random draw answers that badly on VAR:
+    its 10 scales differ so much in importance that the answer depends on which scales the draw hit
+    (the Phase E seed-2 repeat flipped most VAR control contrasts). The pool is every set of m stages
+    with damage's window structure, minus this band's protect and damage sets (the redraw rule's
+    exclusions). The pooled control is the per-image mean over all of them: the exact expectation of a
+    uniformly drawn control, with no draw left to be lucky or unlucky. Sorted, so it is reproducible.
+
+    DiT is refused: its 249 eligible steps give astronomically many placements, and one random draw of
+    25-75 steps already averages over many steps (its seed-2 repeat agreed everywhere).
+    """
+    if model != "var":
+        raise ArmError(f"the exhaustive control pool is VAR-only; {model} has too many placements and its "
+                       "random control already averages over many steps")
+    plan = arm_plan(model, stages, band, m)
+    excluded = {tuple(sorted(plan[arm]["stages"])) for arm in ("protect", "damage")}
+    pool = [chosen for chosen in placements(model, stages, plan["damage"]["windows"])
+            if chosen not in excluded]
+    if not pool:
+        raise ArmError(f"{model} {candidate_label(band)} m={m}: no control placement differs from protect "
+                       "and damage")
+    if len(pool) > POOL_MAX:
+        raise ArmError(f"{model} {candidate_label(band)} m={m}: {len(pool)} placements exceed POOL_MAX "
+                       f"{POOL_MAX}")
+    return sorted(pool)
 
 
 def arm_record(model: str, arm: str, band: str, stages_selected, ordered, k: int,

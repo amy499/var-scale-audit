@@ -214,6 +214,46 @@ def write_sweep_root(root, model: str, value, *, band_names=None, images=((207, 
     return root
 
 
+def write_pool_root(root, value, *, images=((207, 0), (207, 1), (360, 0), (360, 1), (361, 2), (208, 3)),
+                    baseline_value=None, drop=()) -> Path:
+    """A scored VAR pooled-control root as lanes/p4/pilot.py run-pool leaves it, with no GPU.
+
+    `value(stages, metric, class_id, seed)` gives each placement's per-image value; `baseline_value`
+    (default: value((), ...)) the baseline's. `drop` names placements whose run is left out.
+    """
+    import json
+
+    from lanes.p4 import arms, bands
+    root = Path(root)
+    stages = frozen_stages("var")
+    pools = {f"{band}:{m}": [list(s) for s in arms.control_pool("var", stages, band, m)]
+             for band in bands.BANDS for m in arms.budget_grid("var", stages, band)}
+    structures = {arms.arm_plan("var", stages, band, m)["damage"]["windows"]
+                  for band in bands.BANDS for m in arms.budget_grid("var", stages, band)}
+    distinct = sorted({p for lengths in structures for p in arms.placements("var", stages, lengths)})
+    base_value = baseline_value or (lambda metric, c, s: value((), metric, c, s))
+
+    def write(d: Path, arm: str, chosen, fn):
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "run.json").write_text(json.dumps(run_record("var", stages, rows=images, seconds={"sample": 30.0})))
+        (d / "pilot.json").write_text(json.dumps({"arm": arm, "m": len(chosen), "band": "pool" if chosen else "all",
+                                                  "fraction": len(chosen) / len(stages), "stages": list(chosen)}))
+        lines = ["class_id,seed,metric,value,stage"]
+        for metric in ("incep_cos", "cls_prob"):
+            for c, s in images:
+                lines.append(f"{c},{s},{metric},{float(fn(metric, c, s))!r},")
+        (d / "metrics.csv").write_text("\n".join(lines) + "\n")
+
+    write(root / arms.BASELINE, arms.BASELINE, (), base_value)
+    for chosen in distinct:
+        if chosen not in set(drop):
+            write(root / "pool" / f"control_{arms.candidate_label(chosen)}", "control", chosen,
+                  lambda metric, c, s, chosen=chosen: value(chosen, metric, c, s))
+    (root / "pilot_plan.json").write_text(json.dumps({"kind": "pool", "model": "var", "pools": pools,
+                                                      "runs": []}))
+    return root
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) != 1 or argv[0] not in CONFIGS:

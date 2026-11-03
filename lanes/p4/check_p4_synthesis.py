@@ -168,10 +168,11 @@ def check_shortlist(c: Checks):
     r = shortlist.shortlist(_scores(var={"p1": bump({2, 3, 4}), "p2": bump({2, 3, 4})}), "var")
     c.equal("a top window of {2,3,4} is a new candidate set", (r["window"], r["verdict"]),
             ([2, 3, 4], "new candidate set"))
-    c.that("its confirmation is submitted on seed 1, seed 2 and d24",
-           len(r["confirm"]["submit"]) == 3 and all("STAGES=2,3,4" in s for s in r["confirm"]["submit"])
-           and any("SEED=20261070" in s for s in r["confirm"]["submit"])
-           and any("var_d24" in s for s in r["confirm"]["submit"]))
+    c.that("a VAR confirmation is submitted on d20 and d24, and exported against the pooled control",
+           len(r["confirm"]["submit"]) == 2 and all("STAGES=2,3,4" in s for s in r["confirm"]["submit"])
+           and not any("SEED=" in s for s in r["confirm"]["submit"])
+           and any("var_d24" in s for s in r["confirm"]["submit"])
+           and "--control-pool" in r["confirm"]["note"])
     runs = pilot.plan_runs("var", (2, 3, 4), REPO / "configs" / "var_d20.yaml",
                            Path("manifest/frozen_v1_1.csv"), Path("/tmp/x"))
     c.equal("its confirmation plan is one baseline plus 9 arms", len(runs), 10)

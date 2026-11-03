@@ -651,6 +651,97 @@ def check_export(c: Checks):
         c.equal("summary, tidy and compare all exit 0 from the CLI", rc, [0, 0, 0])
 
 
+def _pool_value(stages, metric, c, s):
+    """A pooled-control placement's value: depends on which scales it cut, as on the real VAR."""
+    return 0.5 - 0.03 * sum(stages) / max(len(stages), 1) + 0.001 * ((c + s) % 5)
+
+
+def check_control_pool_export(c: Checks):
+    import io
+    import json
+    import tempfile
+    from contextlib import redirect_stdout
+
+    from lanes.p4 import arms, export, figure4_draft as f4, plotting
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        root = fixtures.write_sweep_root(tmp / "var", "var", _sweep_value())
+        pool_root = fixtures.write_pool_root(tmp / "pool", _pool_value)
+        pool = export.load_pool(pool_root)
+        data = export.load_root(root)
+        pooled = export.pool_controls(data, pool)
+        rows = export.summary_rows(pooled)
+        ctl = next(r for r in rows if (r["band"], r["arm"], r["m"]) == ("middle", "control", 2))
+        sets = arms.control_pool("var", fixtures.frozen_stages("var"), "middle", 2)
+        images = sorted(export._values(data["baseline"], "cls_prob"))
+        want = sum(sum(_pool_value(st, "cls_prob", ci, si) for st in sets) / len(sets) for ci, si in images) / len(images)
+        c.close("the pooled control is the per-image mean over every placement in its pool",
+                ctl["cls_prob"], want, 1e-12)
+        c.equal("the pooled control row names its pool and size", ctl["run_dir"], "pool:middle:2 (34 placements)")
+        prot = next(r for r in rows if (r["band"], r["arm"], r["m"]) == ("middle", "protect", 2))
+        prot_run = next(r for r in data["arms"] if (r["band"], r["arm"], r["m"]) == ("middle", "protect", 2))
+        want_c = sum(export._values(prot_run, "cls_prob")[k]
+                     - sum(_pool_value(st, "cls_prob", *k) for st in sets) / len(sets) for k in images) / len(images)
+        c.close("protect - control is taken against the pooled control, image by image",
+                prot["cls_prob_vs_control"], want_c, 1e-12)
+        plain_rows = export.summary_rows(data)
+        c.that("pooling leaves every protect and damage arm's own mean and CI untouched",
+               [(r["cls_prob"], r["cls_prob_lo"], r["cls_prob_hi"]) for r in rows if r["arm"] in ("protect", "damage")]
+               == [(r["cls_prob"], r["cls_prob_lo"], r["cls_prob_hi"]) for r in plain_rows
+                   if r["arm"] in ("protect", "damage")])
+
+        # refusals
+        holey = fixtures.write_pool_root(tmp / "holey", _pool_value, drop={(3, 6)})
+        c.raises("a pool missing a placement's run is refused",
+                 lambda: export.pool_controls(data, export.load_pool(holey)), "have no run", export.ExportError)
+        c.raises("a root that is not a pool is refused", lambda: export.load_pool(root),
+                 "not a pooled-control root", export.ExportError)
+        other = fixtures.write_pool_root(tmp / "other", _pool_value)
+        rec_path = other / "baseline" / "run.json"
+        rec = json.loads(rec_path.read_text())
+        rec["rows"][0]["tensor_sha256"] = "1" * 64
+        rec_path.write_text(json.dumps(rec))
+        c.raises("a pool whose baseline images differ from the sweep's is refused",
+                 lambda: export.pool_controls(data, export.load_pool(other)), "baseline images differ",
+                 export.ExportError)
+
+        # a confirmation set (any VAR window of 3 or 4 scales) needs no new pool runs
+        stages = fixtures.frozen_stages("var")
+        for window in [tuple(range(a, a + k)) for k in (3, 4) for a in range(0, 11 - k)]:
+            for m in arms.budget_grid("var", stages, window):
+                plan = arms.arm_plan("var", stages, window, m)
+                fake = {"baseline": data["baseline"],
+                        "arms": [{"arm": a, "band": "w", "m": m, "stages": list(plan[a]["stages"])}
+                                 for a in ("protect", "damage", "control")]}
+                members = export.pool_members(fake, "w", m)
+                if not (members and all(x in pool["by_stages"] for x in members)
+                        and tuple(sorted(plan["control"]["stages"])) in members):
+                    c.that(f"window {window} m={m}: the main pool covers every placement", False)
+                    break
+            else:
+                continue
+            break
+        else:
+            c.that("every VAR window of 3 or 4 scales is covered by the main pool, at every budget", True)
+
+        # the CLI and Figure 4
+        with redirect_stdout(io.StringIO()):
+            rc = export.main(["summary", str(root), "--control-pool", str(pool_root), "--out", str(tmp / "p.csv")])
+        c.equal("summary --control-pool exits 0", rc, 0)
+        c.that("... and writes the pooled control rows",
+               "pool:late:3 (54 placements)" in (tmp / "p.csv").read_text())
+        spec = f4.figure4_spec(f4.collect(root, "cls_prob", {"var": pool_root}),
+                               plotting.P3_METRIC_SPECS["cls_prob"])
+        c.that("Figure 4 with a VAR pool says the control is pooled", "pooled control" in spec["footnote"],
+               spec["footnote"])
+        plain = f4.figure4_spec(f4.collect(root, "cls_prob"), plotting.P3_METRIC_SPECS["cls_prob"])
+        c.that("... and without one it does not", "pooled control" not in plain["footnote"])
+        with redirect_stdout(io.StringIO()):
+            rc = f4.main([str(root), "--metric", "cls_prob", "--control-pool", f"var={pool_root}",
+                          "--backend", "pillow", "--out", str(tmp / "f4.png")])
+        c.that("figure4_draft --control-pool renders", rc == 0 and (tmp / "f4.png").is_file())
+
+
 def check_figure4(c: Checks):
     import tempfile
 
@@ -829,6 +920,7 @@ def main(argv=None):
                 ("U4 Figure 5 synthesis frame", check_figure5),
                 ("Phase C export: tidy, paired-CI summary, compare", check_export),
                 ("Figure 4 by model and band, with CIs", check_figure4),
+                ("pooled VAR control in export and Figure 4", check_control_pool_export),
                 ("U3/U4 data layer needs no plotting library", check_data_layer_is_dependency_free)]
     ok = True
     for title, fn in sections:

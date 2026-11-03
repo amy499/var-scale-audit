@@ -500,6 +500,53 @@ def check_sweep_plans(c: Checks):
            all(r["record"]["control_seed"] >= arms.PHASE_E_SEED for r in seeded if r["arm"] == "control"))
 
 
+def check_control_pool(c: Checks):
+    """The pooled VAR control: every placement with damage's window structure, minus protect and damage."""
+    import itertools
+    stages = fixtures.frozen_stages("var")
+    expected = {("early", 1): 8, ("early", 2): 34, ("early", 3): 6, ("middle", 1): 8, ("middle", 2): 34,
+                ("middle", 3): 6, ("late", 1): 8, ("late", 2): 34, ("late", 3): 54}
+    got = {(band, m): len(arms.control_pool("var", stages, band, m))
+           for band in bands.BANDS for m in arms.budget_grid("var", stages, band)}
+    c.equal("pool sizes on VAR-d20: 8/34/6 per band, and 54 for late m=3's (2,1) structure", got, expected)
+    for band in bands.BANDS:
+        for m in arms.budget_grid("var", stages, band):
+            pool = arms.control_pool("var", stages, band, m)
+            plan = arms.arm_plan("var", stages, band, m)
+            seed2 = arms.arm_plan("var", stages, band, m, seed=arms.PHASE_E_SEED)
+            tag = f"var {band} m={m}"
+            c.that(f"{tag}: every placement has damage's window structure",
+                   all(arms.window_lengths(list(s)) == plan["damage"]["windows"] for s in pool))
+            c.that(f"{tag}: protect and damage are excluded, as the redraw rule excludes them",
+                   not {tuple(sorted(plan[a]["stages"])) for a in ("protect", "damage")} & set(pool))
+            c.that(f"{tag}: both drawn controls (seed 1 and seed 2) are members of the pool",
+                   tuple(sorted(plan["control"]["stages"])) in pool
+                   and tuple(sorted(seed2["control"]["stages"])) in pool)
+            every = [x for x in itertools.combinations(range(10), m)
+                     if arms.window_lengths(list(x)) == plan["damage"]["windows"]]
+            c.equal(f"{tag}: the pool is exhaustive (all matching placements but the two excluded)",
+                    len(pool), len(every) - sum(tuple(sorted(plan[a]["stages"])) in every
+                                                for a in ("protect", "damage")))
+    c.raises("DiT is refused: too many placements, and its random control already averages",
+             lambda: arms.control_pool("dit", fixtures.frozen_stages("dit"), "middle", 25), "VAR-only",
+             arms.ArmError)
+
+    manifest = Path("manifest/frozen_v1_1.csv")
+    runs, pools = pilot.plan_pool_runs("var", REPO / "configs" / "var_d20.yaml", manifest, Path("/tmp/x"))
+    c.equal("plan-pool: one baseline then every placement of the 4 window structures (10+36+8+56)",
+            (runs[0]["arm"], len(runs)), ("baseline", 111))
+    c.equal("plan-pool: no placement is run twice", len({r["out_dir"] for r in runs}), len(runs))
+    ran = {tuple(r["record"]["stages"]) for r in runs[1:]}
+    c.that("plan-pool: every pool member has a run",
+           {tuple(s) for sets in pools.values() for s in sets} <= ran)
+    c.that("plan-pool: the sets a pool excludes are run too, for shortlisted windows to reuse",
+           {(1, 3, 4), (6, 8, 9)} <= ran)
+    c.that("plan-pool: every run is a control arm with m = its stage count",
+           all(r["arm"] == "control" and r["m"] == len(r["record"]["stages"]) for r in runs[1:]))
+    _r24, p24 = pilot.plan_pool_runs("var", REPO / "configs" / "var_d24.yaml", manifest, Path("/tmp/x"))
+    c.equal("d24 pools the same placements as d20", p24, pools)
+
+
 def _sweep_shim(tmp: Path, pilot_rc: int, pair_rc: int, score_rc: int) -> Path:
     """A PATH directory whose `python` and `nvidia-smi` stand in for the GPU steps."""
     shim = tmp / f"shim_{pilot_rc}{pair_rc}{score_rc}"
@@ -528,7 +575,7 @@ def check_sweep_body(c: Checks):
             full_env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}", "SHIM_LOG": str(log),
                         "MODEL": "var", "JOB": job, "MACHINE": "test", "OUT_ROOT": str(tmp / "out"),
                         **env}
-            for key in ("CONFIG", "SEED", "OUT_TAG", "STAGES", "KEEP_RAW"):
+            for key in ("CONFIG", "SEED", "OUT_TAG", "STAGES", "KEEP_RAW", "POOL"):
                 if key not in env:
                     full_env.pop(key, None)
             r = subprocess.run(["bash", "-c", f"set -uo pipefail; source {body}"], cwd=REPO,
@@ -566,6 +613,15 @@ def check_sweep_body(c: Checks):
         c.that("STAGES turns the job into a confirmation run under outputs/p4/confirm/",
                " run --stages 2,3,4 " in f" {calls[1]} "
                and (tmp / "out" / "confirm" / "var" / "s234" / "j4").is_dir(), calls[1])
+        rc, last, calls = run((0, 0, 0), "j7", POOL="1")
+        c.that("POOL=1 runs run-pool under outputs/p4/pool/<model>/<config name>/",
+               " run-pool " in f" {calls[1]} "
+               and (tmp / "out" / "pool" / "var" / "var_d20" / "j7").is_dir(), calls[1] if calls else last)
+        rc, last, calls = run((0, 0, 0), "j8", POOL="1", CONFIG="configs/var_d24.yaml")
+        c.that("POOL=1 with the d24 config names the root var_d24",
+               (tmp / "out" / "pool" / "var" / "var_d24" / "j8").is_dir())
+        rc, last, calls = run((0, 0, 0), "j9", POOL="1", STAGES="2,3")
+        c.that("POOL=1 together with STAGES is refused", rc == 1 and not calls)
         (tmp / "out" / "full" / "var" / "seed1" / "j5").mkdir(parents=True)
         (tmp / "out" / "full" / "var" / "seed1" / "j5" / pilot.PLAN_FILE).write_text("{}")
         rc, last, calls = run((0, 0, 0), "j5", SEED="1")
@@ -751,6 +807,7 @@ def main(argv=None):
     skipped = []
     sections = [("arm construction", check_arms), ("scoring driver", check_score),
                 ("Phase C/E sweep plans", check_sweep_plans),
+                ("pooled VAR control", check_control_pool),
                 ("sweep job body and job scripts", check_sweep_body)]
     if not args.arms_only:
         sections.append(("VAR hook, called directly", check_hook_unit))

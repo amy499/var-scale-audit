@@ -14,6 +14,7 @@
 #     sbatch lanes/p4/jobs/sweep_var_tc2.sh
 #     SEED=20261070 sbatch --export=ALL lanes/p4/jobs/sweep_var_tc2.sh                      # Phase E seed 2
 #     CONFIG=configs/var_d24.yaml OUT_TAG=d24 sbatch --export=ALL lanes/p4/jobs/sweep_var_tc2.sh
+#     POOL=1 sbatch --export=ALL --time=05:00:00 lanes/p4/jobs/sweep_var_tc2.sh             # pooled control
 # A TC2 root is never mixed with NSCC runs: each job writes its own root, and machine.txt records which.
 set -uo pipefail
 [[ -n "${SLURM_JOB_ID:-}" ]] || { echo "submit with sbatch; no GPU work on the head node" >&2; exit 1; }

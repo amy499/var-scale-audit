@@ -18,8 +18,8 @@ was seen, and P4's own results never enter it:
 5. The highest score wins. A tie goes to a predeclared band.
 6. Verdict: `covered by <band>` when the winner is a frozen band's stage set -- the Phase C sweep already
    ran the four-arm test on exactly that set, deterministically, so it is the confirmation (KTD7).
-   Otherwise `new candidate set`: confirmation runs are submitted with STAGES=<set>, then repeated with
-   SEED=20261070 and on d24 (RUNBOOK section B5).
+   Otherwise `new candidate set`: confirmation runs are submitted with STAGES=<set> and repeated on
+   d24 (VAR, exported against the pooled control) or with SEED=20261070 (DiT) (RUNBOOK section B5).
 
 Agreement between the lanes is reported beside the verdict, never used to select: pairwise Spearman
 (lanes.p3.agreement.spearman, P3's own function) on each pair's shared stages, or "not computable"
@@ -145,13 +145,18 @@ def shortlist(scores: dict, model: str) -> dict:
     if not winner["band"]:
         stages = ",".join(str(s) for s in winner["stages"])
         tag = arms.candidate_label(winner["stages"])
-        record["confirm"] = {
-            "stages": stages,
-            "submit": [f"qsub -P <project> -v STAGES={stages},OUT_TAG={tag} lanes/p4/jobs/sweep_{model}.pbs",
-                       f"qsub -P <project> -v STAGES={stages},OUT_TAG={tag}_seed2,SEED={arms.PHASE_E_SEED} "
-                       f"lanes/p4/jobs/sweep_{model}.pbs"]
-            + ([f"qsub -P <project> -v STAGES={stages},OUT_TAG={tag}_d24,CONFIG=configs/var_d24.yaml "
-                "lanes/p4/jobs/sweep_var.pbs"] if model == "var" else [])}
+        first = f'qsub -P <project> -v "STAGES={stages},OUT_TAG={tag}" lanes/p4/jobs/sweep_{model}.pbs'
+        if model == "var":
+            # VAR's control is the pooled control (export --control-pool), which already averages over
+            # every placement, so a second control seed adds nothing; the d24 repeat still does.
+            submit = [first, f'qsub -P <project> -v "STAGES={stages},OUT_TAG={tag}_d24,'
+                             f'CONFIG=configs/var_d24.yaml" lanes/p4/jobs/sweep_var.pbs']
+            note = "export each root with --control-pool <the d20 or d24 pool root> (RUNBOOK section B5)"
+        else:
+            submit = [first, f'qsub -P <project> -v "STAGES={stages},OUT_TAG={tag}_seed2,'
+                             f'SEED={arms.PHASE_E_SEED}" lanes/p4/jobs/sweep_{model}.pbs']
+            note = ""
+        record["confirm"] = {"stages": stages, "submit": submit, "note": note}
     return record
 
 
@@ -175,6 +180,8 @@ def main(argv=None):
             print(f"     {row['a']} vs {row['b']}: n={row['n']} rho={row['rho']} p={row['p']} {row['note']}")
         if "confirm" in record:
             print("     confirmation runs:\n       " + "\n       ".join(record["confirm"]["submit"]))
+            if record["confirm"]["note"]:
+                print(f"     then {record['confirm']['note']}")
         print(f"     wrote {path}")
     return 0
 

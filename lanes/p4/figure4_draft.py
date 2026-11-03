@@ -5,6 +5,9 @@ Run from the repo root. Reads only what the sweep wrote; the data layer needs no
     python -m lanes.p4.figure4_draft outputs/p4/full/var/seed20261006/<JOBID> \
         outputs/p4/full/dit/seed20261006/<JOBID> --metric incep_cos --out outputs/p4/figure4_incep_cos.png
 
+With `--control-pool var=POOL_ROOT` the VAR control arm is the mean over every control placement
+(lanes/p4/export.py), which the footnote states.
+
 One panel per (model, candidate band): a full sweep root gives three, a Gate B pilot root gives one.
 Each arm is a line of its per-image mean against the **intervened fraction `m / n`**, the only reduction
 axis the two models share, with a shaded 95% bootstrap CI around it (lanes/p4/export.py, the same
@@ -63,12 +66,19 @@ def _check_complete(model: str, band: str, conds: dict, where) -> list[int]:
     return budgets
 
 
-def collect(root, metric: str) -> list[dict]:
-    """One panel's data per candidate band under `root`: points and CIs per arm, contrasts, savings."""
+def collect(root, metric: str, pools: dict | None = None) -> list[dict]:
+    """One panel's data per candidate band under `root`: points and CIs per arm, contrasts, savings.
+
+    `pools` maps a model to a pooled-control root (lanes/p4/export.py --control-pool); that model's
+    control arms are then the mean over every placement, and the panel says so.
+    """
     root = Path(root)
     try:
         data = export.load_root(root)
         model = data["model"]
+        pool_root = (pools or {}).get(model)
+        if pool_root:
+            data = export.pool_controls(data, export.load_pool(pool_root))
         planned = {}
         for run in data["arms"]:
             planned.setdefault(run["band"], set()).add((run["arm"], run["m"]))
@@ -105,8 +115,9 @@ def collect(root, metric: str) -> list[dict]:
                 by_fraction.setdefault(r["fraction"], []).append(r["saving"])
         stages = sorted({s for run in data["arms"] if run["band"] == band and run["arm"] == "damage"
                          for s in run["stages"]})
+        pooled = [r["run_dir"] for (arm, _m), r in sorted(conds.items()) if arm == "control"] if pool_root else []
         out.append({"model": model, "band": band, "points": points, "ci": ci, "contrasts": contrasts,
-                    "budgets": budgets, "widest": widest, "damage_stages": stages,
+                    "budgets": budgets, "widest": widest, "damage_stages": stages, "pooled": pooled,
                     "savings": {f: plotting.mean(v) for f, v in by_fraction.items()}})
     return out
 
@@ -146,6 +157,9 @@ def figure4_spec(collected: list[dict], spec: "plotting.MetricSpec",
         else:
             note = VAR_NO_SAVING
         notes.append(note)
+        if c.get("pooled"):
+            notes.append(f"{c['model'].upper()} control = per-image mean over every placement with damage's "
+                         "window structure (pooled control), not one random draw")
         conditions = []
         if c["model"] == "var" and c["band"] == "early":
             conditions.append(VAR_EARLY_FLOOR)
@@ -172,12 +186,12 @@ def figure4_spec(collected: list[dict], spec: "plotting.MetricSpec",
 
 
 def figure4(roots, out_path, *, metric: str = "p4_placeholder_rel_l2", backend: str = "auto",
-            metric_spec=None) -> Path:
+            metric_spec=None, pools: dict | None = None) -> Path:
     if metric_spec is None:
         from lanes.p4.metric_placeholder import metric_specs
         known = {s.name: s for s in metric_specs()} | P3_METRIC_SPECS
         metric_spec = known.get(metric, plotting.MetricSpec(metric))
-    collected = [panel for root in roots for panel in collect(Path(root), metric)]
+    collected = [panel for root in roots for panel in collect(Path(root), metric, pools)]
     spec = figure4_spec(collected, metric_spec)
     ncols = spec["ncols"]
     nrows = -(-len(collected) // ncols)
@@ -191,8 +205,16 @@ def main(argv=None):
     ap.add_argument("--out", type=Path, default=Path("outputs/p4/figure4_draft.png"))
     ap.add_argument("--metric", default="p4_placeholder_rel_l2")
     ap.add_argument("--backend", default="auto", choices=("auto", *plotting.BACKENDS))
+    ap.add_argument("--control-pool", action="append", default=[], metavar="MODEL=ROOT",
+                    help="a pooled-control root for one model (lanes/p4/pilot.py run-pool), e.g. var=...")
     args = ap.parse_args(argv)
-    print(f"wrote {figure4(args.roots, args.out, metric=args.metric, backend=args.backend)}")
+    pools = {}
+    for item in args.control_pool:
+        model, sep, path = item.partition("=")
+        if not sep or model not in ("var", "dit"):
+            ap.error(f"--control-pool {item!r}: give MODEL=ROOT, e.g. var=outputs/p4/pool/var/var_d20/<JOB>")
+        pools[model] = Path(path)
+    print(f"wrote {figure4(args.roots, args.out, metric=args.metric, backend=args.backend, pools=pools)}")
     return 0
 
 
