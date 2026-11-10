@@ -337,7 +337,8 @@ exported the same way, with `--control-pool <P20>`.
 
 ```bash
 H=outputs/p4/handoff/$(date +%F)
-python -m lanes.p4.synthesis snapshot --out "$H"            # P1 @ origin/p1/stage-removal, P2/P3 @ origin/main
+git fetch origin main p3/dit-and-cross-lane                 # the snapshot reads these refs, not the working tree
+python -m lanes.p4.synthesis snapshot --out "$H"            # P1/P2 @ origin/main, P3 @ origin/p3/dit-and-cross-lane
 python -m lanes.p4.synthesis figure5 "$H" --out-dir "$S" \
     --p4-summary var="$S/var_seed1_pooled_summary.csv" --p4-summary dit="$S/dit_seed1_summary.csv"
 # before the VAR pool exists, use var_seed1_summary.csv and re-run this line once it does

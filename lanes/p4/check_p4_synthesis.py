@@ -210,6 +210,28 @@ def check_shortlist(c: Checks):
             shortlist.shortlist(_scores(), "var")["verdict"], "no lanes: nothing to shortlist")
 
 
+def check_agreement_p(c: Checks):
+    from lanes.p4 import shortlist
+    # Student t with n - 2 df: the reference values below are scipy.stats.spearmanr's, so the check
+    # holds on an env without scipy (NSCC var-dit), where P3's fallback is a normal approximation
+    c.that("n=8 rho=0.9129 gives p ~ 0.0015, not the normal approximation's ~4e-8",
+           abs(shortlist.spearman_p(0.9129, 8) - 0.001550) < 2e-5, shortlist.spearman_p(0.9129, 8))
+    c.that("n=10 rho=0.6485 sits at p ~ 0.05 (the docstring's threshold)",
+           abs(shortlist.spearman_p(0.6485, 10) - 0.0425) < 2e-3, shortlist.spearman_p(0.6485, 10))
+    c.equal("rho = 0 gives p = 1", round(shortlist.spearman_p(0.0, 10), 12), 1.0)
+    c.equal("|rho| = 1 gives p = 0", shortlist.spearman_p(-1.0, 5), 0.0)
+    c.that("n < 3 gives no p", shortlist.spearman_p(0.5, 2) != shortlist.spearman_p(0.5, 2))
+    c.equal("the sign of rho does not change p", shortlist.spearman_p(0.4, 12), shortlist.spearman_p(-0.4, 12))
+    try:
+        from scipy import stats
+    except ImportError:
+        print("   (scipy absent: the grid comparison against scipy is skipped)")
+        return
+    worst = max(abs(shortlist.spearman_p(r, n) - stats.t.sf(abs(r) * ((n - 2) / (1 - r * r)) ** 0.5, n - 2) * 2)
+                for n in (3, 5, 8, 10, 24, 250) for r in (-0.99, -0.7, -0.3, 0.05, 0.4, 0.65, 0.9, 0.999))
+    c.that("matches scipy's t-based p over a grid of n and rho", worst < 1e-10, worst)
+
+
 def check_explicit_sets(c: Checks):
     for model in ("var", "dit"):
         stages = fixtures.frozen_stages(model)
@@ -249,6 +271,7 @@ def main(argv=None):
     print("== P4 synthesis self-check (CPU; snapshot, adapters, Figure 5, shortlist)")
     sections = [("snapshot from git refs", check_snapshot), ("lane adapters", check_adapters),
                 ("Figure 5 from a snapshot", check_figure5), ("shortlist rule", check_shortlist),
+                ("agreement p-value without scipy", check_agreement_p),
                 ("explicit candidate sets in the arm construction", check_explicit_sets)]
     ok = True
     for title, fn in sections:

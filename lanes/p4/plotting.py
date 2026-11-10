@@ -532,7 +532,7 @@ def _render_pillow(spec: dict, out_path: Path, size) -> Path:
     d = ImageDraw.Draw(img)
     f_small, f_mid, f_title = _font(10), _font(11), _font(14)
     d.text((10, 6), spec["title"], fill="black", font=f_title)
-    foot_lines = _wrap(d, spec["footnote"], f_small, W - 20)
+    foot_lines = _wrap(d, spec["footnote"], f_small, W - 60)   # margin: drawn text runs wider than measured
     for i, line in enumerate(foot_lines):
         d.text((10, H - 14 * (len(foot_lines) - i)), line, fill="#555555", font=f_small)
 

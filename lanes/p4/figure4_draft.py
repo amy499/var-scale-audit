@@ -41,7 +41,7 @@ VAR_EARLY_FLOOR = ("P3 condition, VAR early band: pixel-space metrics floor here
                    "2x2-16x16 grids), so a flat pixel curve is not a finding; incep_cos and cls_prob are "
                    "not pixel-space")
 VAR_MIDDLE_CONTROL = ("P3 condition, VAR middle band: at small m protect lands in late (86.6% of tokens), "
-                      "so protect/damage are read only against the control drawn here")
+                      "so protect/damage are read only against the control (same budget, same window structure)")
 P3_METRIC_SPECS = plotting.P3_METRIC_SPECS
 
 

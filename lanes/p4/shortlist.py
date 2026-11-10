@@ -22,13 +22,16 @@ was seen, and P4's own results never enter it:
    d24 (VAR, exported against the pooled control) or with SEED=20261070 (DiT) (RUNBOOK section B5).
 
 Agreement between the lanes is reported beside the verdict, never used to select: pairwise Spearman
-(lanes.p3.agreement.spearman, P3's own function) on each pair's shared stages, or "not computable"
-when a pair shares fewer than 3 stages. With n = 10, |rho| must exceed about 0.65 for p < 0.05.
+(rho from lanes.p3.agreement.spearman, P3's own function; p from the t distribution with n - 2 df,
+as scipy computes it, whether or not scipy is installed) on each pair's shared stages, or "not
+computable" when a pair shares fewer than 3 stages. With n = 10, |rho| must exceed about 0.65 for
+p < 0.05.
 """
 
 import argparse
 import itertools
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -99,6 +102,51 @@ def _candidates_dit(used: dict, band_sets: dict) -> list[dict]:
     return out
 
 
+def _betainc(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta I_x(a, b) by Lentz's continued fraction (no scipy needed)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    if x > (a + 1) / (a + b + 2):                      # the fraction converges fast only below this
+        return 1.0 - _betainc(b, a, 1.0 - x)
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+                     + a * math.log(x) + b * math.log1p(-x)) / a
+    tiny = 1e-300
+    f, c, d = 1.0, 1.0, 0.0
+    for i in range(400):
+        m = i // 2
+        if i == 0:
+            num = 1.0
+        elif i % 2 == 0:
+            num = m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m))
+        else:
+            num = -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1))
+        d = 1.0 + num * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + num / c
+        c = c if abs(c) > tiny else tiny
+        f *= c * d
+        if abs(1.0 - c * d) < 1e-14:
+            break
+    return front * (f - 1.0)
+
+
+def spearman_p(rho: float, n: int) -> float:
+    """Two-sided p of a Spearman rho on n pairs: Student t with n - 2 df, as scipy.stats.spearmanr.
+
+    P3's spearman() falls back to a normal approximation when scipy is missing (the NSCC var-dit
+    env), which at n = 8 understates p by orders of magnitude, so P4 computes p itself from P3's rho.
+    """
+    if rho != rho or n < 3:
+        return float("nan")
+    if abs(rho) >= 1.0:
+        return 0.0
+    df = n - 2
+    t2 = rho * rho * df / (1.0 - rho * rho)
+    return _betainc(df / 2.0, 0.5, df / (df + t2))
+
+
 def agreement(used_raw: dict) -> list[dict]:
     from lanes.p3.agreement import spearman
     rows = []
@@ -108,7 +156,8 @@ def agreement(used_raw: dict) -> list[dict]:
             rows.append({"a": a, "b": b, "n": len(shared), "rho": None, "p": None,
                          "note": "not computable: fewer than 3 shared stages"})
             continue
-        rho, p = spearman([sa[s] for s in shared], [sb[s] for s in shared])
+        rho, _ = spearman([sa[s] for s in shared], [sb[s] for s in shared])
+        p = spearman_p(rho, len(shared))
         resolved = p == p and p < 0.05
         rows.append({"a": a, "b": b, "n": len(shared), "rho": None if rho != rho else round(rho, 4),
                      "p": None if p != p else float(f"{p:.3g}"),

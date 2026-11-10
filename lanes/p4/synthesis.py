@@ -10,8 +10,8 @@ Run from the repo root.
 **snapshot** copies named files from named git refs (`git show <ref>:<path>`), never from a working
 tree, into one dated folder, and writes `SOURCES.json`: the ref, the commit it resolved to, the path,
 and each copy's sha256. A file the ref does not have is recorded as missing, not fatal. Every adapter
-reads only the snapshot, so a number in the report traces to a commit. P1 is read from
-`origin/p1/stage-removal` until its PR #7 merges.
+reads only the snapshot, so a number in the report traces to a commit. P1 and P2 are read from
+`origin/main`. P3 is read from `origin/p3/dit-and-cross-lane` (`lanes/p3/results/`) until it merges.
 
 **Adapters** turn each lane into one importance number per native stage, **higher = more important**:
 
@@ -49,16 +49,17 @@ if str(REPO) not in sys.path:
 
 from lanes.p4 import bands, fixtures, plotting, progress  # noqa: E402
 
-P1_REF, MAIN_REF = "origin/p1/stage-removal", "origin/main"
-P3_DIR = "lanes/p3/results/figure3"
+MAIN_REF = "origin/main"
+P3_REF = "origin/p3/dit-and-cross-lane"     # P3's tables are not on main yet; switch to MAIN_REF once merged
+P3_DIR = "lanes/p3/results"
 # (lane, ref, path in the repo). The snapshot copies each to <lane>/<file name>.
 SOURCES = (
-    ("p1", P1_REF, "lanes/p1/results/results_sweep.csv"),
-    ("p1", P1_REF, "lanes/p1/results/ranking.csv"),
+    ("p1", MAIN_REF, "lanes/p1/results/results_sweep.csv"),
+    ("p1", MAIN_REF, "lanes/p1/results/ranking.csv"),
     ("p2", MAIN_REF, "lanes/p2/results/phasec/p2_summary.csv"),
     ("p2", MAIN_REF, "lanes/p2/results/phasec/recovery_ranking.csv"),
     ("p2", MAIN_REF, "lanes/p2/results/phasec/p2_curves.csv"),
-    *[("p3", MAIN_REF, f"{P3_DIR}/{model}_{kind}.csv") for model in progress.MODELS
+    *[("p3", P3_REF, f"{P3_DIR}/{model}_{kind}.csv") for model in progress.MODELS
       for kind in ("curves", "semantic")],
 )
 P2_SEVERITY = 1.0
