@@ -169,7 +169,7 @@ def check_shortlist(c: Checks):
     c.equal("a top window of {2,3,4} is a new candidate set", (r["window"], r["verdict"]),
             ([2, 3, 4], "new candidate set"))
     c.that("a VAR confirmation is submitted on d20 and d24, and exported against the pooled control",
-           len(r["confirm"]["submit"]) == 2 and all("STAGES=2,3,4" in s for s in r["confirm"]["submit"])
+           len(r["confirm"]["submit"]) == 2 and all("STAGES=2+3+4," in s for s in r["confirm"]["submit"])
            and not any("SEED=" in s for s in r["confirm"]["submit"])
            and any("var_d24" in s for s in r["confirm"]["submit"])
            and "--control-pool" in r["confirm"]["note"])

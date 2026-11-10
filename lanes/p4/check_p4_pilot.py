@@ -613,6 +613,9 @@ def check_sweep_body(c: Checks):
         c.that("STAGES turns the job into a confirmation run under outputs/p4/confirm/",
                " run --stages 2,3,4 " in f" {calls[1]} "
                and (tmp / "out" / "confirm" / "var" / "s234" / "j4").is_dir(), calls[1])
+        rc, last, calls = run((0, 0, 0), "j4b", STAGES="7+8+9", OUT_TAG="s789")
+        c.that("STAGES joined by + (what qsub -v can carry) reaches the sweep as 7,8,9",
+               rc == 0 and " run --stages 7,8,9 " in f" {calls[1]} ", calls[1] if calls else last)
         rc, last, calls = run((0, 0, 0), "j7", POOL="1")
         c.that("POOL=1 runs run-pool under outputs/p4/pool/<model>/<config name>/",
                " run-pool " in f" {calls[1]} "

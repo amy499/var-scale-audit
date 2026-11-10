@@ -350,7 +350,9 @@ agreement and the verdict. `covered by <band>` means the Phase C sweep already r
 so there are no runs to submit. `new candidate set` prints the `qsub` lines to run (VAR: d20 and d24).
 
 **Confirmation runs (Phase D).** Run these only when `lanes/p4/shortlist.py` reports a new candidate
-set. Pass the same scripts `STAGES=<comma list>` and an `OUT_TAG`; the root goes under
+set. Pass the same scripts `STAGES=<stages joined by +>` (e.g. `STAGES=7+8+9`: `qsub -v` and
+`sbatch --export` split on commas, so `STAGES=7,8,9` fails with "cannot send environment") and an
+`OUT_TAG`; the root goes under
 `outputs/p4/confirm/`. Repeat a new set on d24 too. For VAR, export it with `--control-pool` (the
 d20 or d24 pool root), which makes the `SEED=20261070` repeat unnecessary: only the control depends
 on the seed, and the pool already averages over every placement.

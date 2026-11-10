@@ -8,8 +8,9 @@
 #   SEED      control-placement seed  default: 20261006 (lanes/p4/arms.py CONTROL_SEED)
 #             Phase E second seed: 20261070. Only the control arm depends on it.
 #   OUT_TAG   names the root          default: seed<SEED>; use d24 for the VAR d24 repeat
-#   STAGES    comma-separated stage set: a confirmation run (lanes/p4/shortlist.py) instead of the
-#             full sweep; the root goes under outputs/p4/confirm/
+#   STAGES    stage set joined by + (7+8+9; commas also work when set directly, but qsub -v and
+#             sbatch --export split on commas): a confirmation run (lanes/p4/shortlist.py) instead of
+#             the full sweep; the root goes under outputs/p4/confirm/
 #   POOL      1 runs the pooled VAR control instead (lanes/p4/pilot.py run-pool: every control
 #             placement once, ~109 runs, give the job a 5 h walltime); the root goes under
 #             outputs/p4/pool/ and OUT_TAG defaults to the config name (var_d20, var_d24)
@@ -35,6 +36,7 @@ else
 fi
 MANIFEST="${MANIFEST:-manifest/frozen_v1_1.csv}"
 STAGES="${STAGES:-}"
+STAGES="${STAGES//+/,}"     # 7+8+9 == 7,8,9; qsub -v and sbatch --export split on commas, so submit with +
 export KEEP_RAW="${KEEP_RAW:-0}"
 
 if [[ "$POOL" == 1 && -n "$STAGES" ]]; then

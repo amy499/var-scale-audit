@@ -192,7 +192,7 @@ def shortlist(scores: dict, model: str) -> dict:
                    "verdict": f"covered by {winner['band']}" if winner["band"] else "new candidate set",
                    "candidates": [{**c, "score": round(c["score"], 6)} for c in ranked[:6]]})
     if not winner["band"]:
-        stages = ",".join(str(s) for s in winner["stages"])
+        stages = "+".join(str(s) for s in winner["stages"])   # no commas: qsub -v splits on them
         tag = arms.candidate_label(winner["stages"])
         first = f'qsub -P <project> -v "STAGES={stages},OUT_TAG={tag}" lanes/p4/jobs/sweep_{model}.pbs'
         if model == "var":
