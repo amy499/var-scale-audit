@@ -401,11 +401,61 @@ and per-run means.
 - **`results/fig1d_transfer.png`:** change vs removed scale for crystals and dogs, with CI bars and
   scales 0-5 shaded as real. Panel A is MAD vs the reference; panel B is the PSNR drop to the real image.
 
+**Jobs run.** Both on commit 8d58785, `RESULT: OK`, every step exit 0. Generate steps took 13-19 s per run.
+
+| Job | Dataset | (a) codec | (b) real scales 0-9 | Difference | Hook check |
+|---|---|---|---|---|---|
+| 26205157 | crystals (`~/data_crystal_64_p1`, 64 images) | 26.40 dB | 26.37 dB | −0.030 dB | PASS: 64/64 differ, all paired |
+| 26205158 | dogs (`~/data_dog64_p1`, 64 images) | 25.40 dB | 25.38 dB | −0.016 dB | PASS: 64/64 differ, all paired |
+
+```bash
+python -m lanes.p1.transfer_summary summary --crystal 26205157 --dog 26205158
+```
+
+![Figure 1d](results/fig1d_transfer.png)
+
+*Figure 1d. VAR-d20 with real tokens at scales 0-5, one scale removed at a time. A: mean absolute change
+vs the no-removal reference output. B: PSNR lost to the real image vs the reference (negative = closer to
+the real image). 64 images per dataset, 95% bootstrap CIs (B paired).*
+
+**Observations** (`results/transfer_var.csv`):
+- **Reference:** with real scales 0-5 and no removal, PSNR to the real image is 19.84 dB for crystals and
+  16.81 dB for dogs.
+- **Change vs the reference (A):**
+  - On both datasets the change falls from the early scales to the late ones.
+  - Crystals: removing scale 0 changes the output most (MAD 44.3), then 25.5 at scale 1, down to 8.8
+    at scale 9. Scales 4 and 5 are level (16.1 and 16.3).
+  - Dogs: scales 0 and 1 are level (34.3 and 34.4), falling to 12.7 at scale 9.
+  - Dogs change more than crystals at every removed scale except 0 (crystals 44.3, dogs 34.3).
+  - No image is identical to its reference in any arm (`n_identical` 0).
+- **PSNR to the real image (B):**
+  - Removing a real scale (0-4) lowers it on both datasets, with CIs above 0. On crystals the drop is
+    6.32 dB at scale 0, 3.63 at 1, 2.56 at 2, 1.44 at 3 and 0.33 at 4. On dogs it is 2.08-2.79 dB at
+    scales 0-3 and 1.48 at 4.
+  - Scale 5: crystals 0.09 dB, with a CI that includes 0 (−0.12 to 0.31); dogs 1.28 dB.
+  - Removing a generated scale raises PSNR to the real image in 7 of 8 cases, all with CIs below 0:
+    crystals −0.48 to −0.75 dB at scales 6-9, dogs −0.15 to −0.46 dB at scales 7-9.
+  - The exception is dogs at scale 6: +0.19 dB, CI 0.003 to 0.39.
+- **Texture (`hf_ratio`):**
+  - Crystals: the reference is 0.94. Removing scales 0-2 raises it to 1.25-1.59, and removing scales
+    3-9 lowers it to 0.59-0.79.
+  - Dogs: the reference is 0.86. Removing scales 0-1 raises it to 1.16 and 1.02, and removing scales
+    2-9 gives 0.70-0.85.
+
 **Limits.**
 - VAR only. P2's DiT transfer starts at t197, which comes after P1's early and mid DiT bands, so those
   bands cannot be removed from a real-image start.
 - PSNR, not a classifier: the crystals have no ImageNet class, so the classifier top-1 drop used
   elsewhere in P1 does not apply.
+- This setup tests the coarse-to-fine gradient, not the recognition peak at scales 2-3 found on
+  ImageNet. Two reasons:
+  - Scales 0-5 are teacher-forced from the real image, so the later scales cannot make up for a removed
+    coarse scale. In free generation they can: removing scale 0 or 1 there was harmless (top-1 drop CIs
+    include 0).
+  - PSNR rewards global colour and layout, which the coarse scales carry.
+
+  Even the dogs here, VAR's own images, show scales 0-1 costing about as much as 2-3: PSNR drop
+  2.53 / 2.79 dB vs 2.17 / 2.09 dB, and MAD 34.3 / 34.4 vs 31.8 / 31.8.
 - Class 0 conditioning for both datasets; the model is pulled towards class 0 in both.
 - The two image sets are not alike. The dogs are VAR's own outputs, which are in distribution and
   already lie on the model's manifold. The crystals are real photographs. A difference between the two
