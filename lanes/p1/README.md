@@ -23,7 +23,10 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `jobs/seed2_var_single.env`, `jobs/seed2_var_groups.env`, `jobs/seed2_dit.env` | Phase E: single scales, VAR groups and DiT bands on seed set 2 |
 | `compare_seeds.py` | Phase E: seed set 1 vs seed set 2, per arm, plus rank agreement |
 | `select_crystals.py` | Phase F: picks the 64 OpenCrystalData images (32 per magnification, evenly spaced over the sorted file list); the images are not in the repo |
-| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below) |
+| `make_dog64.py` | Phase F: copies 64 VAR baseline PNGs (all 7 classes) to a folder outside the repo, with `dog64_list.csv` |
+| `jobs/transfer_var.pbs` | Phase F: VAR scale removal on real images, one dataset per job, with codec and hook checks |
+| `transfer_summary.py` | Phase F: `pair` (per-arm change vs the reference, run in the job) and `summary` (CSV + Figure 1d) |
+| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png` |
 
 ## What "removal" means
 
@@ -327,6 +330,90 @@ python -m lanes.p1.compare_seeds --single 26203723 --groups 26203724 --dit 26203
 
   Scale 9's `cls_prob` difference has a CI that includes 0 (+0.040 [−0.011, 0.091]). All the other
   differences, including scales 2 and 3 and DiT mid and late, have CIs that include 0.
+
+## Phase F: transfer to crystals
+
+**Question.** Does removing one VAR scale do the same thing to a real image as to VAR's own generations?
+The design matches P2's VAR Phase F (`lanes/p2/results/phasef/README.md`), so the two lanes' results can
+be compared.
+
+**Design** (`jobs/transfer_var.pbs`, VAR only):
+- **Real tokens:** the real image's VQ tokens are teacher-forced at scales 0-5 (`lanes/p2/transfer.py:real_h`,
+  `P2_REAL_STAGE=5`), and VAR-d20 generates scales 6-9.
+- **Model settings:** cfg 0 (`lanes/p2/jobs/var_cfg0.yaml`), every row conditioned on class 0, as P2. The
+  manifest comes from `python -m lanes.p2.transfer manifest`.
+- **Arms:** a reference with no removal, and scale j removed alone for each j = 0..9
+  (`lanes/p1/hooks.py:remove_scales`, `P1_VAR_SCALES=j`). Both hooks are on the same run. Removing j ≤ 5
+  drops a real scale; removing j ≥ 6 drops a generated one.
+- **Checks per dataset, before the arms:**
+  - **(a) Codec:** `transfer recon --model var`, the VQ tokenizer's reconstruction.
+  - **(b) Real scales 0-9, no removal:** must reproduce (a) to within 0.1 dB of mean PSNR (`CHECK_TOL`).
+    P2's pilot gave 26.16 vs 26.19 dB. If (b) fails, the job stops and exits 1.
+  - **Hooks:** the j = 3 arm runs first. Its `run.json` must list both hooks, and every image must differ
+    from the reference (`tensor_sha256`) with the same random draws (`generator_state_sha256`).
+    Otherwise the job stops.
+- **Scores per image:**
+  - PSNR to the real image and `hf_ratio` (`transfer score`), as P2;
+  - PSNR and mean absolute difference (0-255) between each arm's output and the reference's output for
+    the same image. This is how much removing scale j changes the result, whatever VAR's fidelity to
+    the real image (`transfer_summary.py pair`).
+- **Raw tensors:** each run's `*.pt` are deleted once it is scored.
+
+**Datasets.** Both use identical settings (class 0, cfg 0, real scales 0-5), so only the image domain
+differs.
+- **Crystals** (`~/data_crystal_64_p1` on NSCC): OpenCrystalData, "In-line Image Characterization using
+  EasyViewer" (Barhate et al., Digital Chemical Engineering, 2024; CC-BY-SA-4.0;
+  https://www.kaggle.com/datasets/opencrystaldata/easyviewer-based-image-characterization).
+  - `select_crystals.py` takes 32 images per magnification (x100, x400), evenly spaced over each
+    magnification's sorted file list: 5 Glutamic Acid + 27 Wollastonite per magnification.
+  - Its `sources.csv` sits in the same folder. It is not an image, and `transfer.py` lists only image
+    files, so it is ignored.
+- **Dogs** (`~/data_dog64_p1`): 64 of VAR-d20's clean baseline PNGs (`outputs/baseline/25665469/var_d20`).
+  - `make_dog64.py` sorts the rows of `manifest/frozen_v1_1.csv` by (class_id, seed) and takes positions
+    round(i × 223 / 63), i = 0..63. That gives 9 or 10 images from each of the 7 classes.
+  - It names them `dog01_…` to `dog64_…` so name order is pick order, and writes `dog64_list.csv`. The
+    script uses the standard library only and runs on the login node.
+
+**Submit** (from the repo root on NSCC; use `$HOME`, not `~`, inside `-v`):
+
+```bash
+python lanes/p1/make_dog64.py ~/data_dog64_p1                     # login node, once
+qsub -v REAL_DIR=$HOME/data_crystal_64_p1,DATASET=crystal lanes/p1/jobs/transfer_var.pbs
+qsub -v REAL_DIR=$HOME/data_dog64_p1,DATASET=dog lanes/p1/jobs/transfer_var.pbs
+python -m lanes.p1.transfer_summary summary --crystal <JOB> --dog <JOB>   # laptop, after copying both jobs
+```
+
+Estimated runtime is about 6-8 min per job, plus start-up. This is scaled from P1's 224-image VAR runs
+(~29 s per generate step):
+- 12 generate runs of 64 images at ~15-20 s each, including model load and tokenizing;
+- the codec check, ~0.5 min;
+- scoring and pairing, a few seconds per run.
+
+Each job writes `outputs/p1/<JOBID>/`: `dataset.txt`, `manifest.csv`, `recon/`, `check_k9/`, `reference/`
+and `remove_s0` … `remove_s9`, each with PNGs, `run.json`, `transfer.csv` and, for arms,
+`vs_reference.csv`. It also writes `steps.tsv` and `summary.txt`, which reports check (b), the hook check
+and per-run means.
+
+`transfer_summary.py summary` writes:
+- **`results/transfer_var.csv`:** one row per dataset and run. Columns: mean PSNR to the real image with
+  its CI; the PSNR drop vs the reference with a 95% paired bootstrap CI; mean `hf_ratio`; and PSNR and MAD
+  vs the reference, each a mean with its CI. All CIs use 10000 resamples, seed 0.
+- **`results/fig1d_transfer.png`:** change vs removed scale for crystals and dogs, with CI bars and
+  scales 0-5 shaded as real. Panel A is MAD vs the reference; panel B is the PSNR drop to the real image.
+
+**Limits.**
+- VAR only. P2's DiT transfer starts at t197, which comes after P1's early and mid DiT bands, so those
+  bands cannot be removed from a real-image start.
+- PSNR, not a classifier: the crystals have no ImageNet class, so the classifier top-1 drop used
+  elsewhere in P1 does not apply.
+- Class 0 conditioning for both datasets; the model is pulled towards class 0 in both.
+- The two image sets are not alike. The dogs are VAR's own outputs, which are in distribution and
+  already lie on the model's manifold. The crystals are real photographs. A difference between the two
+  therefore mixes "real vs generated" with "dogs vs crystals".
+- The reconstruction ceiling is the VQ codec (P2: about 26.2-26.5 dB on crystals), so compare drops and
+  changes, not absolute PSNR.
+- `psnr_vs_ref` is capped at 99 dB for an image identical to the reference; `n_identical` in the CSV
+  counts these.
 
 ## How to run
 

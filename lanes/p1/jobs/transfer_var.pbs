@@ -1,0 +1,210 @@
+#!/bin/bash
+#PBS -N p1_transfer
+#PBS -P personal-gura0001
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o outputs/p1/pbs/
+# P1 Phase F (lanes/p1/README.md): VAR scale removal on real images, one dataset per job. Same design as P2's
+# VAR Phase F (lanes/p2/jobs/phasef.pbs): the real image's VQ tokens at scales 0-5 (lanes/p2/transfer.py:real_h,
+# P2_REAL_STAGE=5), VAR-d20 generates 6-9, cfg 0 (lanes/p2/jobs/var_cfg0.yaml), every row class 0. Arms: the
+# reference (no removal) and remove scale j alone, j = 0..9 (lanes/p1/hooks.py:remove_scales, both hooks on
+# the same run). Submit from the repo root (mkdir -p outputs/p1/pbs first); use $HOME, not ~, in -v:
+#     qsub -v REAL_DIR=$HOME/data_crystal_64_p1,DATASET=crystal lanes/p1/jobs/transfer_var.pbs
+#     qsub -v REAL_DIR=$HOME/data_dog64_p1,DATASET=dog lanes/p1/jobs/transfer_var.pbs
+# Order, all in outputs/p1/<JOBID>/:
+#   manifest   one row per image in REAL_DIR (sorted by name; non-image files such as sources.csv ignored)
+#   recon      (a) codec check: the VQ tokenizer's reconstruction, all 10 scales
+#   check_k9   (b) real scales 0-9, no removal: its mean PSNR to the real images must match (a) within CHECK_TOL
+#              dB (default 0.1; P2's pilot: 26.16 vs 26.19). Otherwise the job stops here and exits 1.
+#   reference  real scales 0-5, no removal
+#   remove_s3  first arm, then the hook check: its run.json lists both hooks and every image differs from the
+#              reference (tensor_sha256) with the same random draws (generator_state_sha256). Otherwise exit 1.
+#   remove_s0 .. remove_s9 (the rest)
+# Each run: generate, score (lanes.p2.transfer score: PSNR to the real image, hf_ratio), arms also pair
+# (lanes.p1.transfer_summary pair: PSNR and MAD vs the reference output), then its *.pt are deleted.
+# Exits 1 (after writing summary.txt) if any step failed.
+set -uo pipefail
+[[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
+cd "$PBS_O_WORKDIR"
+[[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
+[[ -d "${REAL_DIR:-}" ]] || { echo "set REAL_DIR to a folder of images (qsub -v REAL_DIR=...,DATASET=...)" >&2; exit 1; }
+[[ "${DATASET:-}" == crystal || "${DATASET:-}" == dog ]] || { echo "set DATASET=crystal or DATASET=dog" >&2; exit 1; }
+
+REAL_DIR="$(realpath "$REAL_DIR")"
+CONFIG=lanes/p2/jobs/var_cfg0.yaml
+REAL_STAGE=5                         # P2_REAL_STAGE: real scales 0..5, as P2's VAR Phase F
+CLASS_ID=0                           # as P2: every row conditioned on class 0, both datasets
+CHECK_TOL="${CHECK_TOL:-0.1}"        # dB, check (b) vs (a)
+BATCH=16
+JOB="${PBS_JOBID%%.*}"
+OUT="outputs/p1/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 P2_REAL_DIR="$REAL_DIR" P2_REAL_MANIFEST="$OUT/manifest.csv"
+FAILED=0
+RUNS=()   # in run order, for the summary
+
+: > "$OUT/steps.tsv"
+step() {   # step NAME CMD...: run, log exit code + duration
+    local name="$1"; shift
+    echo; echo "===== [$name] $*"
+    local t0=$SECONDS
+    "$@"
+    local rc=$?
+    printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >> "$OUT/steps.tsv"
+    echo "===== [$name] exit=$rc ($((SECONDS - t0))s)"
+    return $rc
+}
+step_field() {   # step_field NAME COLUMN (2 = exit code, 3 = seconds)
+    awk -F'\t' -v n="$1" -v c="$2" '$1 == n { v = $c } END { print (v == "" ? "-" : v) }' "$OUT/steps.tsv"
+}
+
+echo "job=$PBS_JOBID host=$(hostname) date=$(date -Is)"
+nvidia-smi > "$OUT/nvidia-smi.txt" 2>&1
+N_IMAGES="$(python -c "import sys; from lanes.p2.transfer import images; print(len(images(sys.argv[1])))" "$REAL_DIR")" \
+    || { echo "FAILED: cannot list images in $REAL_DIR"; exit 1; }
+(( N_IMAGES % BATCH == 0 )) || { echo "FAILED: $N_IMAGES images in $REAL_DIR, not a multiple of $BATCH"; exit 1; }
+printf 'DATASET=%s\nREAL_DIR=%s\nN_IMAGES=%s\nREAL_STAGE=%s\nCLASS_ID=%s\nCONFIG=%s\n' \
+    "$DATASET" "$REAL_DIR" "$N_IMAGES" "$REAL_STAGE" "$CLASS_ID" "$CONFIG" > "$OUT/dataset.txt"
+echo "dataset: $DATASET  real dir: $REAL_DIR ($N_IMAGES images)  real scales 0-$REAL_STAGE  class $CLASS_ID  config $CONFIG"
+
+drop_pt() {   # drop_pt <run-dir>: delete its raw tensors, only inside this job's directory
+    local real out n
+    real="$(realpath -e "$1")" && out="$(realpath -e "$OUT")" || { echo "drop_pt: cannot resolve $1"; return 1; }
+    if [[ "$real" != "$out"/?* || ! -f "$real/run.json" ]]; then
+        echo "drop_pt: refusing to delete in $1 (not a run directory inside $OUT)"; return 1
+    fi
+    n=$(find "$real" -maxdepth 1 -type f -name '*.pt' | wc -l)
+    find "$real" -maxdepth 1 -type f -name '*.pt' -delete || return 1
+    echo "drop_pt: removed $n raw tensors from $1"
+}
+
+generate() {   # generate <run> <real stage> [removed scale]
+    local run="$1" k="$2" j="${3:-}" hooks=(--hook lanes/p2/transfer.py:real_h) env=(P2_REAL_STAGE="$2")
+    if [[ -n "$j" ]]; then hooks+=(--hook lanes/p1/hooks.py:remove_scales); env+=(P1_VAR_SCALES="$j"); fi
+    env "${env[@]}" python -m runner.generate --config "$CONFIG" --manifest "$OUT/manifest.csv" \
+        --batch-size $BATCH --out-dir "$OUT/$run" "${hooks[@]}"
+}
+
+run_one() {   # run_one <run> <real stage> [removed scale]: generate, score, pair (arms), drop raw tensors
+    local run="$1" dir="$OUT/$1"
+    RUNS+=("$run")
+    step "$run:generate" generate "$@" || return 1
+    step "$run:score" python -m lanes.p2.transfer score "$dir" --real-dir "$REAL_DIR" --manifest "$OUT/manifest.csv" \
+        || return 1
+    if [[ -n "${3:-}" ]]; then
+        step "$run:pair" python -m lanes.p1.transfer_summary pair "$dir" --reference "$OUT/reference" || return 1
+    fi
+    step "$run:drop_pt" drop_pt "$dir" || return 1
+}
+
+# (b) vs (a): mean PSNR to the real images of check_k9 vs the codec reconstruction.
+read -r -d '' CHECK_B <<'EOF'
+import csv, sys
+mean = lambda p: (lambda v: sum(v) / len(v))([float(r["psnr"]) for r in csv.DictReader(open(p))])
+a, b, tol = mean(sys.argv[1]), mean(sys.argv[2]), float(sys.argv[3])
+ok = abs(a - b) <= tol
+print(f"{'PASS' if ok else 'FAIL'}: codec {a:.2f} dB, real scales 0-9 {b:.2f} dB, difference {b - a:+.3f} dB (tolerance {tol})")
+sys.exit(0 if ok else 1)
+EOF
+
+# Hook check on remove_s3: both hooks registered, every image changed, same random draws as the reference.
+read -r -d '' CHECK_HOOKS <<'EOF'
+import json, sys
+ref, arm = (json.load(open(f"{d}/run.json")) for d in sys.argv[1:3])
+stage = int(sys.argv[3])
+names = [h["name"] for h in arm["hooks"]]
+want = [f"p2_real_h_s0-{stage}", "p1_remove_scales_3"]
+errors = []
+if sorted(names) != sorted(want):
+    errors.append(f"run.json hooks {names}, expected both of {want}")
+rkey = {(r["class_id"], r["seed"]): r for r in ref["rows"]}
+akey = {(r["class_id"], r["seed"]): r for r in arm["rows"]}
+if set(rkey) != set(akey):
+    errors.append("the reference and remove_s3 have different rows")
+else:
+    same = sum(rkey[k]["tensor_sha256"] == akey[k]["tensor_sha256"] for k in rkey)
+    paired = sum(rkey[k]["generator_state_sha256"] == akey[k]["generator_state_sha256"] for k in rkey)
+    if same:
+        errors.append(f"{same}/{len(rkey)} images identical to the reference: the removal did not fire on them")
+    if paired != len(rkey):
+        errors.append(f"only {paired}/{len(rkey)} rows have the reference's generator_state_sha256 (not paired)")
+print(("PASS: hooks " + ", ".join(names) + f"; {len(rkey)}/{len(rkey)} images differ from the reference, all paired")
+      if not errors else "FAIL: " + "; ".join(errors))
+sys.exit(1 if errors else 0)
+EOF
+
+# One summary line per run from its CSVs.
+read -r -d '' RUN_LINE <<'EOF'
+import csv, math, sys
+from pathlib import Path
+d = Path(sys.argv[1])
+def mean(rows, k):
+    v = [float(r[k]) for r in rows if not math.isnan(float(r[k]))]
+    return f"{sum(v) / len(v):.3f}" if v else "-"
+t = d / ("recon.csv" if d.name == "recon" else "transfer.csv")
+rows = list(csv.DictReader(open(t))) if t.is_file() else []
+v = d / "vs_reference.csv"
+ref = list(csv.DictReader(open(v))) if v.is_file() else []
+print("\t".join([mean(rows, "psnr") if rows else "-", mean(rows, "hf_ratio") if rows else "-",
+                 mean(ref, "psnr_vs_ref") if ref else "-", mean(ref, "mad_vs_ref") if ref else "-"]))
+EOF
+
+CHECK_B_RESULT="not run" HOOK_RESULT="not run"
+write_summary() {
+    {
+        echo "P1 PHASE F TRANSFER ($DATASET)  job $PBS_JOBID  $(date -Is)"
+        echo "code             $(git rev-parse --abbrev-ref HEAD) $(git log -1 --oneline)"
+        echo "real dir         $REAL_DIR ($N_IMAGES images)"
+        echo "manifest sha256  $(sha256sum "$OUT/manifest.csv" 2>/dev/null | cut -d' ' -f1)"
+        echo "design           real scales 0-$REAL_STAGE (real_h), class $CLASS_ID, $CONFIG"
+        echo "check (b)        $CHECK_B_RESULT"
+        echo "hook check       $HOOK_RESULT"
+        echo
+        printf '%-11s %4s %5s %4s %4s %5s  %9s %8s %11s %10s\n' run gen score pair drop secs psnr_real hf_ratio psnr_vs_ref mad_vs_ref
+        for r in recon ${RUNS[@]+"${RUNS[@]}"}; do
+            local gen secs vals
+            if [[ "$r" == recon ]]; then gen="$(step_field recon 2)"; secs="$(step_field recon 3)"
+            else gen="$(step_field "$r:generate" 2)"; secs="$(step_field "$r:generate" 3)"; fi
+            IFS=$'\t' read -r -a vals < <(python -c "$RUN_LINE" "$OUT/$r")
+            printf '%-11s %4s %5s %4s %4s %5s  %9s %8s %11s %10s\n' "$r" "$gen" "$(step_field "$r:score" 2)" \
+                "$(step_field "$r:pair" 2)" "$(step_field "$r:drop_pt" 2)" "$secs" "${vals[@]}"
+        done
+        echo "(exit codes; - = not run. psnr_real / hf_ratio vs the real images; psnr_vs_ref / mad_vs_ref vs reference)"
+        echo
+        if [[ "$FAILED" == 0 ]]; then echo "RESULT: OK"; else echo "RESULT: FAILED"; fi
+    } > "$OUT/summary.txt"
+    cat "$OUT/summary.txt"
+}
+finish() { write_summary; if [[ "$FAILED" == 0 ]]; then echo "P1 PHASE F DONE"; else echo "P1 PHASE F FAILED: see above"; fi; exit "$FAILED"; }
+
+step manifest python -m lanes.p2.transfer manifest "$REAL_DIR" --out "$OUT/manifest.csv" --class-id "$CLASS_ID" \
+    || { FAILED=1; finish; }
+step recon python -m lanes.p2.transfer recon "$REAL_DIR" --out "$OUT/recon" --model var || { FAILED=1; finish; }
+
+# (b): real scales 0-9 must reproduce the codec reconstruction; stop otherwise.
+run_one check_k9 9 || { FAILED=1; finish; }
+CHECK_B_RESULT="$(python -c "$CHECK_B" "$OUT/recon/recon.csv" "$OUT/check_k9/transfer.csv" "$CHECK_TOL")"
+[[ "$CHECK_B_RESULT" == PASS* ]] || { echo "STOP: check (b) failed: $CHECK_B_RESULT"; FAILED=1; finish; }
+echo "check (b): $CHECK_B_RESULT"
+
+# Reference, then remove_s3 and the hook check before the other arms.
+run_one reference "$REAL_STAGE" || { FAILED=1; finish; }
+run_one remove_s3 "$REAL_STAGE" 3 || { FAILED=1; finish; }
+HOOK_RESULT="$(python -c "$CHECK_HOOKS" "$OUT/reference" "$OUT/remove_s3" "$REAL_STAGE")"
+[[ "$HOOK_RESULT" == PASS* ]] || { echo "STOP: hook check failed: $HOOK_RESULT"; FAILED=1; finish; }
+echo "hook check: $HOOK_RESULT"
+
+for j in 0 1 2 4 5 6 7 8 9; do
+    run_one "remove_s$j" "$REAL_STAGE" "$j" || { echo "FAILED: remove_s$j"; FAILED=1; }
+done
+finish
