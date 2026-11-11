@@ -1,0 +1,222 @@
+{
+  "model": "var",
+  "rule": "KTD6: P1-P3 only; constant lanes excluded; each lane min-max normalized; stage value = mean over lanes; VAR windows of each frozen band size scored by mean, DiT picks among its three bands; ties to a predeclared band. KTD7: a winner equal to a frozen band is covered by the sweep.",
+  "lanes_used": [
+    "p1",
+    "p2",
+    "p3_energy",
+    "p3_identity"
+  ],
+  "lanes_excluded": {},
+  "agreement": [
+    {
+      "a": "p1",
+      "b": "p2",
+      "n": 10,
+      "rho": -0.0667,
+      "p": 0.855,
+      "note": "not significant at this n: this cannot resolve it"
+    },
+    {
+      "a": "p1",
+      "b": "p3_energy",
+      "n": 10,
+      "rho": -0.2067,
+      "p": 0.567,
+      "note": "not significant at this n: this cannot resolve it"
+    },
+    {
+      "a": "p1",
+      "b": "p3_identity",
+      "n": 10,
+      "rho": -0.0851,
+      "p": 0.815,
+      "note": "not significant at this n: this cannot resolve it"
+    },
+    {
+      "a": "p2",
+      "b": "p3_energy",
+      "n": 10,
+      "rho": -0.3647,
+      "p": 0.3,
+      "note": "not significant at this n: this cannot resolve it"
+    },
+    {
+      "a": "p2",
+      "b": "p3_identity",
+      "n": 10,
+      "rho": -0.6079,
+      "p": 0.0623,
+      "note": "not significant at this n: this cannot resolve it"
+    },
+    {
+      "a": "p3_energy",
+      "b": "p3_identity",
+      "n": 10,
+      "rho": 0.9512,
+      "p": 2.34e-05,
+      "note": ""
+    }
+  ],
+  "window": [
+    7,
+    8,
+    9
+  ],
+  "score": 0.415927,
+  "covering_band": null,
+  "verdict": "new candidate set",
+  "candidates": [
+    {
+      "stages": [
+        7,
+        8,
+        9
+      ],
+      "score": 0.415927,
+      "band": null
+    },
+    {
+      "stages": [
+        6,
+        7,
+        8,
+        9
+      ],
+      "score": 0.373645,
+      "band": "late"
+    },
+    {
+      "stages": [
+        1,
+        2,
+        3
+      ],
+      "score": 0.333798,
+      "band": null
+    },
+    {
+      "stages": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "score": 0.310162,
+      "band": null
+    },
+    {
+      "stages": [
+        2,
+        3,
+        4
+      ],
+      "score": 0.309847,
+      "band": null
+    },
+    {
+      "stages": [
+        0,
+        1,
+        2
+      ],
+      "score": 0.291669,
+      "band": "early"
+    }
+  ],
+  "confirm": {
+    "stages": "7,8,9",
+    "submit": [
+      "qsub -P <project> -v \"STAGES=7,8,9,OUT_TAG=s7+8+9\" lanes/p4/jobs/sweep_var.pbs",
+      "qsub -P <project> -v \"STAGES=7,8,9,OUT_TAG=s7+8+9_d24,CONFIG=configs/var_d24.yaml\" lanes/p4/jobs/sweep_var.pbs"
+    ],
+    "note": "export each root with --control-pool <the d20 or d24 pool root> (RUNBOOK section B5)"
+  },
+  "snapshot": "outputs/p4/handoff/2026-11-10",
+  "snapshot_sources": {
+    "taken": "2026-11-10T19:55:05+08:00",
+    "files": [
+      {
+        "lane": "p1",
+        "ref": "origin/main",
+        "path": "lanes/p1/results/results_sweep.csv",
+        "commit": "14994c7bac69282faeb40394d51c1bb2e4afb325",
+        "missing": false,
+        "copy": "p1/results_sweep.csv",
+        "sha256": "98f1e683001f06f07df0111e8baacfd816b1c217c021b0130e084823541537af"
+      },
+      {
+        "lane": "p1",
+        "ref": "origin/main",
+        "path": "lanes/p1/results/ranking.csv",
+        "commit": "14994c7bac69282faeb40394d51c1bb2e4afb325",
+        "missing": false,
+        "copy": "p1/ranking.csv",
+        "sha256": "f0a7a440d59bb76976e60f2c2b173905a80e8c4ab0b60c0535e711e1e5fa4775"
+      },
+      {
+        "lane": "p2",
+        "ref": "origin/main",
+        "path": "lanes/p2/results/phasec/p2_summary.csv",
+        "commit": "14994c7bac69282faeb40394d51c1bb2e4afb325",
+        "missing": false,
+        "copy": "p2/p2_summary.csv",
+        "sha256": "fa3ef6f75b8f0f9d73e86dc9df4161cb5299337ec23c350461da5cb89e45cabf"
+      },
+      {
+        "lane": "p2",
+        "ref": "origin/main",
+        "path": "lanes/p2/results/phasec/recovery_ranking.csv",
+        "commit": "14994c7bac69282faeb40394d51c1bb2e4afb325",
+        "missing": false,
+        "copy": "p2/recovery_ranking.csv",
+        "sha256": "73f18b3149de15c4dc72d763651410113549872da2576965aa1b19fba705af4d"
+      },
+      {
+        "lane": "p2",
+        "ref": "origin/main",
+        "path": "lanes/p2/results/phasec/p2_curves.csv",
+        "commit": "14994c7bac69282faeb40394d51c1bb2e4afb325",
+        "missing": false,
+        "copy": "p2/p2_curves.csv",
+        "sha256": "f38ea6a8579304807c58638316f66c03de960299fbdf10381cdb715ca5a85b0d"
+      },
+      {
+        "lane": "p3",
+        "ref": "origin/p3/dit-and-cross-lane",
+        "path": "lanes/p3/results/var_curves.csv",
+        "commit": "c03182e07ebaa5c2cd098275d850918115b2c2df",
+        "missing": false,
+        "copy": "p3/var_curves.csv",
+        "sha256": "81334a9bf6cd09b3a2740f3c76f08d7c3d05477cd5c6bf0ab554512ddb8823a5"
+      },
+      {
+        "lane": "p3",
+        "ref": "origin/p3/dit-and-cross-lane",
+        "path": "lanes/p3/results/var_semantic.csv",
+        "commit": "c03182e07ebaa5c2cd098275d850918115b2c2df",
+        "missing": false,
+        "copy": "p3/var_semantic.csv",
+        "sha256": "52b05c4c7f03b7651d1f1c8961aa1f161a5fe8f75465a74466478b123f038ef7"
+      },
+      {
+        "lane": "p3",
+        "ref": "origin/p3/dit-and-cross-lane",
+        "path": "lanes/p3/results/dit_curves.csv",
+        "commit": "c03182e07ebaa5c2cd098275d850918115b2c2df",
+        "missing": false,
+        "copy": "p3/dit_curves.csv",
+        "sha256": "00c59a5772f56bf2bc7c7c867f9f9608ab153441f6b04ea07f2123458289a454"
+      },
+      {
+        "lane": "p3",
+        "ref": "origin/p3/dit-and-cross-lane",
+        "path": "lanes/p3/results/dit_semantic.csv",
+        "commit": "c03182e07ebaa5c2cd098275d850918115b2c2df",
+        "missing": false,
+        "copy": "p3/dit_semantic.csv",
+        "sha256": "dfa7a29427d66f6a0d783567ea2acf36c2616e2e514fc935f864c17b2b662996"
+      }
+    ]
+  }
+}
