@@ -19,6 +19,9 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `plot_heatmap.py` | Figure 1c: per-class drop in top-1 for every VAR single-scale, VAR 2-scale and DiT arm |
 | `jobs/p3_both.env` | Baselines only, both models, with P3's observe hooks (P3 ride-along) |
 | `compare_p3_var.py` | Checks two P3 VAR snapshot folders are identical, file by file |
+| `make_seed2_manifest.py`, `manifests/seed2.csv` | Phase E: the second seed set (same classes and layout as v1.1, master seed 61320018) |
+| `jobs/seed2_var_single.env`, `jobs/seed2_var_groups.env`, `jobs/seed2_dit.env` | Phase E: single scales, VAR groups and DiT bands on seed set 2 |
+| `compare_seeds.py` | Phase E: seed set 1 vs seed set 2, per arm, plus rank agreement |
 | `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below) |
 
 ## What "removal" means
@@ -224,6 +227,53 @@ Observations (not conclusions):
   0.482.
 - Every 2-scale window has a lower top-1 than either of its two single-scale arms (point estimates;
   for {0,1}, 0.906 against 0.911 and 0.920, within the CIs).
+
+## Phase E: second seed set
+
+**Why.** Every result above uses one set of 224 images (manifest v1.1). Their CIs cover resampling
+those images, not drawing new ones. A second, independent seed set checks whether the scale ranking, the
+top scales and the DiT band order are properties of the models or of these 224 images.
+
+**Manifest.** `make_seed2_manifest.py` writes `manifests/seed2.csv`:
+- same 7 classes and per-image layout as v1.1: 32 images per class, class 151 first, header `class_id,seed`;
+- master seed 61320017 + 1 = 61320018, seeds from v1.1's own `derive_seeds`;
+- 224 unique seeds, none shared with `manifest/frozen_v1_1.csv` (the script checks this and stops
+  otherwise);
+- LF line endings, byte-identical on re-run (sha256 `85fe1715fb71…`).
+
+**Jobs.** All three use `KEEP_RAW=0`, `QUALITY=1` and `P3_RIDEALONG=0`. There is no reference baseline
+for these seeds, so `BASELINE_REF` points at a path that does not exist (`outputs/baseline/none_for_seed2`)
+and the hash check reports SKIPPED, which `gateb.pbs` does not count as a failure. Pairing within each
+job is still checked against that job's own baseline.
+
+```bash
+python -m lanes.p1.make_seed2_manifest                                        # once; already in the repo
+qsub -v SETTINGS=lanes/p1/jobs/seed2_var_single.env lanes/p1/jobs/gateb.pbs   # scales 0-9 alone, ~8 min
+qsub -v SETTINGS=lanes/p1/jobs/seed2_var_groups.env lanes/p1/jobs/gateb.pbs   # {0,1,2} {3,4,5} {7,8,9}, ~3 min
+qsub -v SETTINGS=lanes/p1/jobs/seed2_dit.env lanes/p1/jobs/gateb.pbs          # DiT 1-83 84-166 167-249, ~25 min
+```
+
+These estimates come from the seed-1 jobs' `steps.tsv` and exclude job start-up.
+
+**What will be compared.** Seed 1 uses jobs 25893211 + 25916920 (single scales), 25893212 (groups) and
+25893213 (DiT):
+
+```bash
+python -m lanes.p1.compare_seeds --single <JOB> --groups <JOB> --dit <JOB>
+```
+
+The jobs can be given as they finish. It writes two new files and never touches the existing results:
+- `results/seed2_results.csv`: same columns as `results_sweep.csv`.
+- `results/seed_compare.csv`: one row per arm, matched on the scales or steps removed. For top-1 and
+  `cls_prob` it gives the drop on each seed set with its paired 95% CI, and the difference
+  (seed 2 − seed 1) with a 95% CI from resampling the two image sets independently.
+
+It also prints:
+- the Spearman rho between the two seed sets' rankings of the 10 single scales by `cls_prob` drop;
+- the top-3 scales on each seed set (seed 1: 3, 2, 4);
+- the DiT band order on each seed set (seed 1: late > mid > early).
+
+The script stops if the two seed sets share an image.
 
 ## How to run
 
