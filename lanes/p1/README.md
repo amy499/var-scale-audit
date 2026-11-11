@@ -22,7 +22,8 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `make_seed2_manifest.py`, `manifests/seed2.csv` | Phase E: the second seed set (same classes and layout as v1.1, master seed 61320018) |
 | `jobs/seed2_var_single.env`, `jobs/seed2_var_groups.env`, `jobs/seed2_dit.env` | Phase E: single scales, VAR groups and DiT bands on seed set 2 |
 | `compare_seeds.py` | Phase E: seed set 1 vs seed set 2, per arm, plus rank agreement |
-| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below) |
+| `select_crystals.py` | Phase F: picks the 64 OpenCrystalData images (32 per magnification, evenly spaced over the sorted file list); the images are not in the repo |
+| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below) |
 
 ## What "removal" means
 
@@ -274,6 +275,58 @@ It also prints:
 - the DiT band order on each seed set (seed 1: late > mid > early).
 
 The script stops if the two seed sets share an image.
+
+**Jobs run.** All three report `RESULT: OK` with manifest sha256 `85fe1715fb71…` and the hash check
+SKIPPED, as intended.
+
+| Job | Settings | Arms |
+|---|---|---|
+| 26203723 | `seed2_var_single.env` | scales 0-9 alone |
+| 26203724 | `seed2_var_groups.env` | {0,1,2}, {3,4,5}, {7,8,9} |
+| 26203725 | `seed2_dit.env` | DiT 1-83, 84-166, 167-249 |
+
+The seed-2 VAR baselines of 26203723 and 26203724 are byte-identical: 224/224 `tensor_sha256`, checked on
+NSCC and again from the two `run.json` files. That is the same check the seed-1 jobs pass against
+`outputs/baseline/25665469`.
+
+**Results** (`results/seed2_results.csv`: 19 runs; `results/seed_compare.csv`: 16 arms).
+
+```bash
+python -m lanes.p1.compare_seeds --single 26203723 --groups 26203724 --dit 26203725
+```
+
+- Baselines: VAR top-1 0.929 on seed 2 vs 0.942 on seed 1; DiT 0.862 vs 0.906.
+- Single VAR scales:
+  - Ranked by `cls_prob` drop, the order is the same on both seed sets: 3, 2, 4, 6, 9, 7, 5, 8, 1, 0
+    (Spearman rho = 1.000).
+  - Two neighbouring pairs are close on seed 2: scale 4 0.244 vs scale 6 0.243, and scale 5 0.111 vs
+    scale 8 0.110.
+  - Top-3: scales 3, 2, 4 on both (seed 1: 0.466, 0.346, 0.247; seed 2: 0.488, 0.315, 0.244).
+  - Scales 0 and 1 have a top-1 drop whose CI includes 0 on both seed sets.
+- VAR groups (top-1, seed 1 → seed 2):
+  - {0,1,2} and {3,4,5} give top-1 0.000 on both seed sets, so their drop equals the baseline: 0.942 on
+    seed 1, 0.929 on seed 2.
+  - {7,8,9} gives top-1 0.107 on seed 1 and 0.094 on seed 2, a drop of 0.835 on both.
+  - All six differences (3 groups × top-1 and `cls_prob`) have CIs that include 0.
+- DiT order by `cls_prob` drop:
+  - seed 1: late (0.266) > mid (0.187) > early (0.078);
+  - seed 2: late (0.238) > mid (0.219) > early (−0.026).
+  - On seed 2, skipping the early steps leaves top-1 at or above baseline (drop −0.022, CI −0.085 to
+    0.040).
+- 5 of the 32 seed 2 − seed 1 differences (16 arms × top-1 and `cls_prob`) have a 95% CI that excludes
+  0, without multiple-comparison correction; about 1-2 are expected by chance at 95%. The single-scale
+  ranking is unchanged (rho = 1.0). The five are:
+
+  | Arm | Measure | Difference [95% CI] |
+  |---|---|---|
+  | scale 8 | top-1 | +0.080 [0.018, 0.143] |
+  | scale 8 | `cls_prob` | +0.054 [0.012, 0.096] |
+  | scale 9 | top-1 | +0.103 [0.027, 0.179] |
+  | DiT early | top-1 | −0.103 [−0.183, −0.022] |
+  | DiT early | `cls_prob` | −0.104 [−0.176, −0.029] |
+
+  Scale 9's `cls_prob` difference has a CI that includes 0 (+0.040 [−0.011, 0.091]). All the other
+  differences, including scales 2 and 3 and DiT mid and late, have CIs that include 0.
 
 ## How to run
 
