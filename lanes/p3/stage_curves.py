@@ -163,10 +163,18 @@ def main(argv=None):
         ax.plot(x, [r["cosine"] for r in rows], "^:", label="cosine to final")
         ax.plot(x, [np.sqrt(max(0, 1 - r["norm_ratio"] ** 2)) for r in rows],
                 color="0.6", lw=1, ls="-.", label=r"$\sqrt{1-ratio^2}$ (energy prediction)")
-        ax.set_xticks(x); ax.set_xticklabels([r["stage"] for r in rows], fontsize=8)
-        ax.set_xlabel(f"{args.model.upper()} stage"); ax.set_ylim(-0.02, 1.05)
-        ax.set_title(f"{args.model.upper()} stage curves — rel_dist tracks accumulated energy",
-                     fontsize=10)
+        ax.set_xticks(x)
+        ax.set_xticklabels([r["stage"] for r in rows], fontsize=8,
+                           rotation=90 if len(rows) > 12 else 0)
+        ax.set_xlabel("VAR scale" if args.model == "var"
+                      else "DiT timestep (999 = pure noise  ->  0 = finished image)")
+        # DiT's first guess can sit FURTHER from the final latent than zero does (rel_dist > 1)
+        top = max(1.05, max(r["rel_dist"] for r in rows) + 0.05)
+        ax.set_ylim(-0.02, top)
+        # The title states what the diagnostic above actually found, never a fixed claim
+        verdict = ("rel_dist tracks accumulated energy" if dc < 0.05 and dr < 0.05
+                   else f"NOT orthogonal (max |cos - ratio| = {dc:.2f}): rel_dist carries direction too")
+        ax.set_title(f"{args.model.upper()} stage curves — {verdict}", fontsize=10)
         ax.legend(fontsize=8, frameon=False); ax.grid(alpha=.3)
         fig.tight_layout(); args.plot.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(args.plot, dpi=140); plt.close(fig)
