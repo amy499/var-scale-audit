@@ -1,0 +1,12 @@
+== pairing against p4_results_b4/pilot_var/25969141/baseline
+   note  no pilot_plan.json beside the baseline, so completeness cannot be checked here
+   PASS  control_m1               224/224 rows paired   224 of 224 images changed
+   PASS  control_m2               224/224 rows paired   224 of 224 images changed
+   PASS  control_m3               224/224 rows paired   224 of 224 images changed
+   PASS  damage_m1                224/224 rows paired   224 of 224 images changed
+   PASS  damage_m2                224/224 rows paired   224 of 224 images changed
+   PASS  damage_m3                224/224 rows paired   224 of 224 images changed
+   PASS  protect_m1               224/224 rows paired   224 of 224 images changed
+   PASS  protect_m2               224/224 rows paired   224 of 224 images changed
+   PASS  protect_m3               224/224 rows paired   224 of 224 images changed
+ALL ARMS PAIRED

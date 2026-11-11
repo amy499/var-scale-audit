@@ -1,0 +1,271 @@
+"""P4: reference `stages` tables for CPU checks, built without torch, a GPU or a checkpoint.
+
+Run from the repo root. Standard library plus PyYAML (what `runner/config.py` itself needs).
+
+The authoritative stages table is the one `runner/generate.py` writes into `run.json`. This module
+reproduces the *baseline* table of a given schedule so the frozen band lists (lanes/p4/bands.py) and
+lanes/p4/check_p4_shared.py can be checked on the laptop, where no 256px checkpoint is loaded.
+`check_p4_shared.py` asserts this reproduction against a real `run.json` whenever one is given, so a
+drift from upstream is caught rather than assumed away.
+
+    python -m lanes.p4.fixtures var     # the configs/var_d20.yaml table
+    python -m lanes.p4.fixtures dit     # the configs/dit_xl2_256.yaml table
+"""
+
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+import yaml  # noqa: E402 - PyYAML only, the one dependency runner/config.py itself has
+
+REPO = Path(__file__).resolve().parents[2]
+CONFIGS = {"var": REPO / "configs" / "var_d20.yaml", "dit": REPO / "configs" / "dit_xl2_256.yaml"}
+
+# Upstream DiT: diffusion/gaussian_diffusion.py get_named_beta_schedule("linear", N).
+BETA_START, BETA_END, BETA_REFERENCE_STEPS = 1e-4, 0.02, 1000
+ORIGINAL_STEPS = 1000   # the trained schedule DiT respaces down to num_sampling_steps
+
+
+def frozen_config(model: str) -> dict:
+    """The frozen config for `model`, so fixtures cannot drift from configs/ (docs/HANDOVER.md section 3)."""
+    if model not in CONFIGS:
+        raise ValueError(f"model must be one of {tuple(CONFIGS)}, got {model!r}")
+    return yaml.safe_load(CONFIGS[model].read_text())
+
+
+# ---------------------------------------------------------------- VAR
+
+def var_stages(patch_nums) -> list[dict]:
+    """The VAR stages table for `patch_nums`: the fields runner.hooks.var_stage_table writes."""
+    patch_nums = list(patch_nums)
+    if not patch_nums:
+        raise ValueError("patch_nums is empty")
+    sn = len(patch_nums)
+    total = sum(pn * pn for pn in patch_nums)
+    table, cum = [], 0
+    for si, pn in enumerate(patch_nums):
+        cum += pn * pn
+        table.append({"stage": si, "p": si / (sn - 1) if sn > 1 else 1.0, "pn": pn, "n_tokens": pn * pn,
+                      "cum_tokens": cum, "total_tokens": total})
+    return table
+
+
+# ---------------------------------------------------------------- DiT
+
+def linear_betas(original_steps: int = ORIGINAL_STEPS) -> list[float]:
+    """get_named_beta_schedule("linear", N), as np.linspace computes it (i*step + start, last = stop)."""
+    scale = BETA_REFERENCE_STEPS / original_steps
+    start, stop = scale * BETA_START, scale * BETA_END
+    step = (stop - start) / (original_steps - 1)
+    betas = [i * step + start for i in range(original_steps)]
+    betas[-1] = stop
+    return betas
+
+
+def _cumprod_one_minus(betas) -> list[float]:
+    """cumprod(1 - betas), the one place that arithmetic is spelled, so it stays bit-identical."""
+    out, running = [], 1.0
+    for beta in betas:
+        running *= 1.0 - beta
+        out.append(running)
+    return out
+
+
+def alphas_cumprod(original_steps: int = ORIGINAL_STEPS) -> list[float]:
+    return _cumprod_one_minus(linear_betas(original_steps))
+
+
+def timestep_map(num_sampling_steps: int, original_steps: int = ORIGINAL_STEPS) -> list[int]:
+    """Upstream diffusion/respace.py space_timesteps(original, [count]), increasing (one section).
+
+    Upstream *accumulates* `cur_idx += frac_stride` and rounds the running sum; it does not round
+    `k * frac_stride`. The two disagree for 278 of the 999 step counts (the smallest is 21), because
+    repeated addition and one multiplication round differently in binary floating point. 250 and 20 --
+    the real and tiny schedules -- happen to agree, so the shortcut would have stayed dormant here and
+    produced a wrong schedule for any other step count. Reproduce the accumulation, as
+    `spaced_alphas_cumprod` already does for the same reason.
+    """
+    if num_sampling_steps < 1:
+        raise ValueError(f"num_sampling_steps must be >= 1, got {num_sampling_steps}")
+    if num_sampling_steps > original_steps:
+        raise ValueError(f"cannot respace {original_steps} steps up to {num_sampling_steps}")
+    if num_sampling_steps == 1:
+        return [0]
+    frac_stride = (original_steps - 1) / (num_sampling_steps - 1)
+    cur, taken = 0.0, []
+    for _ in range(num_sampling_steps):
+        taken.append(round(cur))
+        cur += frac_stride
+    return sorted(set(taken))
+
+
+def spaced_alphas_cumprod(tmap, ab) -> list[float]:
+    """The alphas_cumprod of upstream's SpacedDiffusion over `tmap`, indexed by respaced index.
+
+    diffusion/respace.py does not index the base schedule: it derives one new beta per kept timestep
+    from consecutive kept alpha_cumprod values, and GaussianDiffusion then recomputes
+    alphas_cumprod = cumprod(1 - new_betas). That is mathematically alphas_cumprod[tmap[i]] but rounds
+    differently (docs/hook_interface.md section 11b), so reproducing the arithmetic -- not the
+    shortcut -- is what makes this table bit-identical to the runner's.
+    """
+    new_betas, last = [], 1.0
+    for t in tmap:
+        new_betas.append(1.0 - ab[t] / last)
+        last = ab[t]
+    return _cumprod_one_minus(new_betas)
+
+
+def dit_stages(num_sampling_steps: int, original_steps: int = ORIGINAL_STEPS) -> list[dict]:
+    """The DiT baseline stages table: the fields runner.dit_model.DiTModel.stage_table writes.
+
+    Baseline only -- no skipped timesteps. A skip run's table is whatever the runner wrote; this is
+    the reference the frozen bands are cut from, and bands are cut on the baseline enumeration.
+    """
+    tmap = timestep_map(num_sampling_steps, original_steps)
+    spaced = spaced_alphas_cumprod(tmap, alphas_cumprod(original_steps))
+    steps = len(tmap)
+    table = []
+    for j, i in enumerate(range(steps - 1, -1, -1)):
+        ab_in = spaced[i]
+        ab_out = spaced[i - 1] if i > 0 else 1.0
+        table.append({"stage": tmap[i], "p": j / (steps - 1) if steps > 1 else 1.0, "step": j, "merged": False,
+                      "timestep_in": tmap[i], "timestep_out": int(tmap[i - 1]) if i > 0 else None,
+                      "alpha_bar_in": ab_in, "alpha_bar_out": ab_out,
+                      "sigma_in": (1.0 - ab_in) ** 0.5, "sigma_out": (1.0 - ab_out) ** 0.5})
+    return table
+
+
+# ---------------------------------------------------------------- the frozen schedules
+
+def frozen_stages(model: str) -> list[dict]:
+    """The stages table of the frozen config: VAR-d20's 10 scales, DiT's 250 steps."""
+    return stages_for_settings(frozen_config(model), str(CONFIGS[model]))[1]
+
+
+def stages_for_settings(settings: dict, where: str = "settings") -> tuple[str, list[dict]]:
+    """(model, baseline stages table) from anything carrying `model`, `build` and `sampler`.
+
+    That is both a run config and a `run.json`, which records the same three keys -- so a driver can
+    plan arms from a config and a check can rebuild a finished run's table, through one dispatch.
+    """
+    model = settings.get("model")
+    if model == "var":
+        return model, var_stages(settings["build"]["patch_nums"])
+    if model == "dit":
+        return model, dit_stages(settings["sampler"]["num_sampling_steps"])
+    raise ValueError(f"{where}: model must be 'var' or 'dit', got {model!r}")
+
+
+def stages_for_config(config_path) -> tuple[str, list[dict]]:
+    """(model, baseline stages table) for a run config, so a driver can plan arms without a GPU."""
+    return stages_for_settings(yaml.safe_load(Path(config_path).read_text()), str(config_path))
+
+
+def run_record(model: str, stages: list[dict], rows=((207, 0),), **extra) -> dict:
+    """A minimal run record shaped like run.json, for checks that read one through load_run()."""
+    return {"model": model, "stages": stages,
+            "rows": [{"class_id": c, "seed": s, "file": f"class{c:04d}_seed{s}",
+                      "tensor_sha256": "0" * 64, "generator_state_sha256": "0" * 64} for c, s in rows],
+            **extra}
+
+
+def write_sweep_root(root, model: str, value, *, band_names=None, images=((207, 0), (207, 1), (360, 0),
+                                                                          (360, 1), (361, 2), (208, 3)),
+                     seed=None, skip=()) -> Path:
+    """A scored sweep root as lanes/p4/pilot.py and lanes/p4/score.py leave it, with no GPU.
+
+    `value(arm, band, m, metric, class_id, seed)` gives each image's metric value. The stage sets are
+    the real arm plans of the frozen config. `skip` names (band, arm, m) conditions to leave out, so a
+    check can build a sweep that is missing an arm or a budget. DiT runs get a sampling time that falls
+    with the number of skipped steps; VAR runs all take the same time.
+    """
+    import json
+
+    from lanes.p4 import arms, bands
+    root = Path(root)
+    band_names = band_names or bands.BANDS
+    stages = frozen_stages(model)
+    n = len(stages)
+    kw = {} if seed is None else {"seed": seed}
+
+    def write(d: Path, arm: str, band: str, m: int, chosen):
+        d.mkdir(parents=True, exist_ok=True)
+        kept = [s for s in stages if s["stage"] not in set(chosen)] if model == "dit" else stages
+        record = run_record(model, kept, rows=images, seconds={"sample": 100.0 * (1 - m / n) if
+                                                                model == "dit" else 30.0},
+                            skip_timesteps=list(chosen) if model == "dit" else [])
+        (d / "run.json").write_text(json.dumps(record))
+        (d / "pilot.json").write_text(json.dumps({"arm": arm, "m": m, "band": band, "fraction": m / n,
+                                                  "stages": list(chosen)}))
+        lines = ["class_id,seed,metric,value,stage"]
+        for metric in ("incep_cos", "cls_prob"):
+            for c, s in images:
+                lines.append(f"{c},{s},{metric},{float(value(arm, band, m, metric, c, s))!r},")
+        (d / "metrics.csv").write_text("\n".join(lines) + "\n")
+
+    write(root / arms.BASELINE, arms.BASELINE, "all", 0, [])
+    for band in band_names:
+        for m in arms.budget_grid(model, stages, band):
+            plan = arms.arm_plan(model, stages, band, m, **kw)
+            for arm in arms.INTERVENED_ARMS:
+                if (band, arm, m) not in set(skip):
+                    write(root / band / f"{arm}_m{m}", arm, band, m, plan[arm]["stages"])
+    return root
+
+
+def write_pool_root(root, value, *, images=((207, 0), (207, 1), (360, 0), (360, 1), (361, 2), (208, 3)),
+                    baseline_value=None, drop=()) -> Path:
+    """A scored VAR pooled-control root as lanes/p4/pilot.py run-pool leaves it, with no GPU.
+
+    `value(stages, metric, class_id, seed)` gives each placement's per-image value; `baseline_value`
+    (default: value((), ...)) the baseline's. `drop` names placements whose run is left out.
+    """
+    import json
+
+    from lanes.p4 import arms, bands
+    root = Path(root)
+    stages = frozen_stages("var")
+    pools = {f"{band}:{m}": [list(s) for s in arms.control_pool("var", stages, band, m)]
+             for band in bands.BANDS for m in arms.budget_grid("var", stages, band)}
+    structures = {arms.arm_plan("var", stages, band, m)["damage"]["windows"]
+                  for band in bands.BANDS for m in arms.budget_grid("var", stages, band)}
+    distinct = sorted({p for lengths in structures for p in arms.placements("var", stages, lengths)})
+    base_value = baseline_value or (lambda metric, c, s: value((), metric, c, s))
+
+    def write(d: Path, arm: str, chosen, fn):
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "run.json").write_text(json.dumps(run_record("var", stages, rows=images, seconds={"sample": 30.0})))
+        (d / "pilot.json").write_text(json.dumps({"arm": arm, "m": len(chosen), "band": "pool" if chosen else "all",
+                                                  "fraction": len(chosen) / len(stages), "stages": list(chosen)}))
+        lines = ["class_id,seed,metric,value,stage"]
+        for metric in ("incep_cos", "cls_prob"):
+            for c, s in images:
+                lines.append(f"{c},{s},{metric},{float(fn(metric, c, s))!r},")
+        (d / "metrics.csv").write_text("\n".join(lines) + "\n")
+
+    write(root / arms.BASELINE, arms.BASELINE, (), base_value)
+    for chosen in distinct:
+        if chosen not in set(drop):
+            write(root / "pool" / f"control_{arms.candidate_label(chosen)}", "control", chosen,
+                  lambda metric, c, s, chosen=chosen: value(chosen, metric, c, s))
+    (root / "pilot_plan.json").write_text(json.dumps({"kind": "pool", "model": "var", "pools": pools,
+                                                      "runs": []}))
+    return root
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) != 1 or argv[0] not in CONFIGS:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    model = argv[0]
+    stages = frozen_stages(model)
+    print(f"{model}: {len(stages)} stages from {CONFIGS[model].relative_to(REPO)}")
+    for row in stages:
+        print(row)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
