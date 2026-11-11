@@ -16,9 +16,10 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `summarize.py` | One row per arm: means, paired drops vs baseline with bootstrap CIs, KID; `--compare` for arm vs arm; `--ranking-out` for the ranking |
 | `plot_fig1.py` | Figure 1: VAR top-1 by removed scale / window, DiT top-1 per arm, with CIs |
 | `failure_grid.py` | Figure 1b: four fixed example images under each VAR and DiT arm |
+| `plot_heatmap.py` | Figure 1c: per-class drop in top-1 for every VAR single-scale, VAR 2-scale and DiT arm |
 | `jobs/p3_both.env` | Baselines only, both models, with P3's observe hooks (P3 ride-along) |
 | `compare_p3_var.py` | Checks two P3 VAR snapshot folders are identical, file by file |
-| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `fig1.png`, `fig1b_failures.png` (all quoted below) |
+| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below) |
 
 ## What "removal" means
 
@@ -48,6 +49,11 @@ Each arm removes the same number of stages: **3 VAR scales**, **83 DiT steps** (
   (14 / 77 / 525 of 680 tokens; scale 9 alone is 256), while every DiT arm removes 83 model calls.
   Compare the arms with this in mind.
 - The late DiT arm skips the final step, so the last kept step (166) goes straight to x_0.
+- **P1's DiT arms are offset by one step from P4's frozen bands** (`lanes/p4/bands.py`: early 0-82,
+  middle 83-165, late 166-249), because the runner cannot skip step 0. P1 early (1-83) and mid (84-166)
+  each overlap their P4 band in 82 of 83 steps. P1 late (167-249, 83 steps) lies entirely inside P4's
+  late band, which has 84 steps (166-249), so the overlap is 83 of 83. P4's Figure 5 maps P1's DiT arms
+  onto P4's bands.
 
 DiT step indices are converted to timesteps from this job's own DiT baseline `run.json` (`stages`
 table, `step` -> `timestep_in`). The job stops that arm if an index or timestep is not in the table,
@@ -110,6 +116,15 @@ between mid and late is not clearly non-zero.
 | 25893213 | DiT sweep (`sweep_dit.env`) | early 1-83, mid 84-166, late 167-249 |
 | 25916920 | VAR single scales (`single_var.env`) | each of scales 1-8 alone |
 | 25916921 | VAR 2-scale windows (`window2_var.env`) | {0,1}, {1,2}, ... {8,9} |
+| 25983856 | P3 ride-along (`p3_both.env`, commit 1fa31ca) | clean VAR + DiT baselines with P3's observe hooks; no removal arms |
+| 25985813 | P3 ride-along (`p3_both.env`, commit 58ec5e5, after P3's PR #8 merged) | clean VAR + DiT baselines with P3's observe hooks; no removal arms |
+
+The two P3 ride-along jobs passed every check, and the snapshots were delivered to P3:
+- baselines byte-identical to 25665469 (224/224 rows, both models);
+- 140 VAR and 336 DiT `.npz` per job, with no `_failures.log`;
+- `lanes/p3/verify_extraction.py` checks 1-2 PASS;
+- snapshots bit-identical across runs: VAR against Gate B's 25891860 140/140 (`compare_p3_var.py`),
+  and DiT 25985813 against 25983856 336/336.
 
 `window3_var.env` (the five 3-scale windows not yet run) is held back: the three 3-scale groups already
 run span top-1 0.000-0.107, so further 3-scale windows are unlikely to separate positions.
@@ -127,6 +142,26 @@ the table). Dashed line: clean baseline.
 Figure 1b (`results/fig1b_failures.png`, from `python -m lanes.p1.failure_grid`; needs matplotlib +
 Pillow): the same four images (first manifest row of each of the first four classes) under each VAR
 and DiT arm, headed by the arm's mean top-1 over all 224 images.
+
+![Figure 1c](results/fig1c_heatmap.png)
+
+Figure 1c (`results/fig1c_heatmap.png` and `results/heatmap_by_class.csv`, from
+`python -m lanes.p1.plot_heatmap`; needs matplotlib): drop in top-1 per class (baseline - arm, paired,
+against the same job's baseline) for every VAR single scale (A), VAR 2-scale window (B) and DiT arm (C),
+on one shared colour scale. Each cell is **n = 32 images**, so per-class CIs are wide: the 95% CI
+half-width has a median of 0.16 and goes up to 0.22 (`heatmap_by_class.csv` has every CI).
+
+Observations from `heatmap_by_class.csv` (not conclusions):
+- Single scales: scale 3 has the largest drop for 6 of 7 classes. The exception is beagle, where scale 2
+  is larger (0.375 vs 0.344), with heavily overlapping CIs. For every class, the drops at scales 2 and
+  3 are at least as large as at any other scale; another scale ties scale 2 for Chihuahua (scale 6,
+  0.344) and German shepherd (scale 4, 0.188).
+- 2-scale windows: {2,3} has the largest drop for every class (tied with {1,2} for German shepherd,
+  both 0.875; pug reaches 1.000).
+- DiT: late has the largest drop for 6 of 7 classes. Chihuahua is the exception (mid 0.344
+  [0.12, 0.56] vs late 0.156 [0.00, 0.31]; CIs overlap).
+- The 7 negative cells (arm better than baseline for that class) are all at scale 0, scale 1 or {0,1},
+  and none is below -0.094.
 
 Table from `lanes/p1/results/results_sweep.csv`; `lanes/p1/results/ranking.csv` from the same command:
 `python -m lanes.p1.summarize 25893211 25893212 25893213 25916920 25916921 --out lanes/p1/results/results_sweep.csv --ranking-out lanes/p1/results/ranking.csv`.
