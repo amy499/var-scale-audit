@@ -26,7 +26,8 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `make_dog64.py` | Phase F: copies 64 VAR baseline PNGs (all 7 classes) to a folder outside the repo, with `dog64_list.csv` |
 | `jobs/transfer_var.pbs` | Phase F: VAR scale removal on real images, one dataset per job, with codec and hook checks |
 | `transfer_summary.py` | Phase F: `pair` (per-arm change vs the reference, run in the job) and `summary` (CSV + Figure 1d) |
-| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png` |
+| `frc.py` | Fourier Ring Correlation of each removal arm vs its reference / baseline / the real image, by frequency (Figure 1e) |
+| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png`; FRC adds `frc.csv`, `frc_bands.csv`, `fig1e_frc.png` |
 
 ## What "removal" means
 
@@ -464,6 +465,80 @@ the real image). 64 images per dataset, 95% bootstrap CIs (B paired).*
   changes, not absolute PSNR.
 - `psnr_vs_ref` is capped at 99 dB for an image identical to the reference; `n_identical` in the CSV
   counts these.
+
+## FRC: which frequencies a removed scale changes
+
+**What it measures.** Fourier Ring Correlation (FRC) is the correlation between two images' Fourier
+coefficients on each ring of spatial frequency r. It is 1 where the images agree and about 0 where they
+are unrelated.
+
+**Method** (`frc.py`, CPU only):
+- Each image is converted to 256×256 luminance, made zero-mean, multiplied by a 2D Hann window, and
+  Fourier-transformed.
+- FRC(r) = Re Σ F1·F2* / √(Σ|F1|² · Σ|F2|²) over rings 1 cycle/image wide, r = 1..128.
+- Each pair is summarised over two bands: the **latent band**, r = 1-8 (up to 8 cycles, the most VAR's
+  16×16 token grid can carry), and the **decoder band**, r = 9-128.
+
+**Scale-to-frequency mapping.** Scale k has an n_k × n_k grid (n_k = 1, 2, 3, 4, 5, 6, 8, 10, 13, 16), so it
+can carry up to n_k/2 cycles/image: 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6.5, 8.
+
+**Comparisons.** Every arm reports the mean curve over images and band means with 95% bootstrap CIs
+over images (10000 resamples, seed 0).
+- **Phase F** (26205157 crystals, 26205158 dogs, 64 images each): `remove_s0`-`s9` vs the reference
+  run; and the reference and each arm vs the real image.
+- **ImageNet free generation** (seed set 1, 224 images): `remove_s0`-`s9` vs their own job's baseline,
+  paired by (class_id, seed). Scales 0 and 9 come from 25893211, scales 1-8 from 25916920.
+- **Matching the real images:**
+  - Dogs: the list is re-derived with `make_dog64.py`'s rule.
+  - Crystals: read from `../crystal_64_p1`.
+  - The script stops unless the image names in each job's `transfer.csv` match the 64 local files.
+
+**Sanity check** (printed on every run):
+- An image against itself gives FRC = 1.000000 at every r (16 images).
+- Unrelated pairs (baseline image i vs i + 32, another class and seed; 224 pairs) give mean FRC +0.004
+  over r = 1-8 and +0.002 over r = 9-128.
+- A few rings are the exception, reaching up to 0.13: r = 91, 100-102 and 127-128. These are the
+  narrow peaks visible in every panel of Figure 1e. All VAR outputs share them, whatever the content.
+
+```bash
+python -m lanes.p1.frc        # ~2.5 min on the laptop; needs Pillow, numpy, matplotlib (python3 here)
+```
+
+Outputs:
+- `results/frc.csv`: one row per (comparison, dataset, arm, r), 6656 rows.
+- `results/frc_bands.csv`: one row per (comparison, dataset, arm), 52 rows.
+- `results/fig1e_frc.png`.
+
+![Figure 1e](results/fig1e_frc.png)
+
+*Figure 1e. FRC of each removal arm against the run without removal, by spatial frequency. A, B: Phase F
+(real tokens at scales 0-5), against the reference. C: ImageNet free generation, against the baseline.
+Dashed lines mark n_k/2; the solid line marks the end of the latent band.*
+
+**Observations** (`results/frc.csv`, `results/frc_bands.csv`):
+- **Mainly above n_k/2, not below.** For every arm of scales 1-8 in all three panels, mean FRC over the
+  latent rings above n_k/2 is lower than over the rings at or below it. Scales 0 and 9 have latent
+  rings on one side of n_k/2 only, so they can't be compared this way. Examples:
+  - ImageNet scale 3: 0.62 at r ≤ 1.5, 0.07 at r = 2-8;
+  - crystal scale 5: 0.78 at r ≤ 3, 0.15 at r = 4-8;
+  - dog scale 3: 0.82 vs 0.39.
+
+  Removing a scale changes the frequencies the later, finer scales would build on. The decoder band
+  stays low in every arm: 0.01-0.36 on ImageNet, 0.05-0.37 on dogs, 0.05-0.32 on crystals.
+- **Free generation vs teacher forcing differ at the coarse end:**
+  - **ImageNet:** removing scale 0, 1 or 2 gives a different image at almost every frequency. FRC at
+    r = 1 is 0.35-0.44, and the latent band is 0.08-0.09 [CIs 0.06-0.11].
+  - **Phase F:** the real scales 0-5 pin the layout. FRC at r = 1 stays at 0.83 or higher for every
+    arm (lowest: 0.828, crystals scale 1).
+  - **Where the latent band bottoms out:** on ImageNet it is lowest at scales 0-2 and rises steadily
+    to 0.91 at scale 9. On Phase F it is lowest in the middle: crystals 0.39 [0.35, 0.43] at scale 5,
+    dogs 0.48-0.50 at scales 3-5. It is higher at both ends, for example crystals 0.55 at scale 0 and
+    0.85 at scale 9.
+- **Against the real image:** the reference already has latent-band FRC 0.44 (crystals) and 0.65
+  (dogs), and decoder-band FRC 0.02 and 0.06. Removing a scale lowers the latent band most at scales
+  4-5 for crystals (0.33) and scales 3-5 for dogs (0.42-0.45). For crystals, removing scales 6-9
+  leaves it within 0.02 of the reference. For dogs, removing scales 7-9 leaves it within 0.04; scale 6
+  gives 0.54.
 
 ## How to run
 
