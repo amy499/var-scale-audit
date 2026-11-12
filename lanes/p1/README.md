@@ -423,14 +423,19 @@ the real image). 64 images per dataset, 95% bootstrap CIs (B paired).*
 - **Reference:** with real scales 0-5 and no removal, PSNR to the real image is 19.84 dB for crystals and
   16.81 dB for dogs.
 - **Change vs the reference (A):**
-  - On both datasets the change falls from the early scales to the late ones.
+  - Crystals show the same pattern as dogs under the same teacher-forced setup: the change falls from
+    the early scales to the late ones.
   - Crystals: removing scale 0 changes the output most (MAD 44.3), then 25.5 at scale 1, down to 8.8
     at scale 9. Scales 4 and 5 are level (16.1 and 16.3).
+  - This scale-0 result applies to teacher forcing only. In free generation (the main ImageNet runs),
+    removing scale 0 or 1 is harmless: top-1 0.911 and 0.920 against 0.942 for the baseline, with
+    drop CIs that include 0.
   - Dogs: scales 0 and 1 are level (34.3 and 34.4), falling to 12.7 at scale 9.
   - Dogs change more than crystals at every removed scale except 0 (crystals 44.3, dogs 34.3).
   - No image is identical to its reference in any arm (`n_identical` 0).
 - **PSNR to the real image (B):**
-  - Removing a real scale (0-4) lowers it on both datasets, with CIs above 0. On crystals the drop is
+  - Crystals show the same pattern as dogs under the same teacher-forced setup: removing a real scale
+    (0-4) lowers it, with CIs above 0. On crystals the drop is
     6.32 dB at scale 0, 3.63 at 1, 2.56 at 2, 1.44 at 3 and 0.33 at 4. On dogs it is 2.08-2.79 dB at
     scales 0-3 and 1.48 at 4.
   - Scale 5: crystals 0.09 dB, with a CI that includes 0 (−0.12 to 0.31); dogs 1.28 dB.
@@ -455,8 +460,9 @@ the real image). 64 images per dataset, 95% bootstrap CIs (B paired).*
     include 0).
   - PSNR rewards global colour and layout, which the coarse scales carry.
 
-  Even the dogs here, VAR's own images, show scales 0-1 costing about as much as 2-3: PSNR drop
-  2.53 / 2.79 dB vs 2.17 / 2.09 dB, and MAD 34.3 / 34.4 vs 31.8 / 31.8.
+  Crystals show the same pattern as dogs under the same teacher-forced setup. Even the dogs, VAR's own
+  images, show scales 0-1 costing about as much as 2-3: PSNR drop 2.53 / 2.79 dB vs 2.17 / 2.09 dB, and
+  MAD 34.3 / 34.4 vs 31.8 / 31.8. So the scale-0 cost here applies to teacher forcing only.
 - Class 0 conditioning for both datasets; the model is pulled towards class 0 in both.
 - The two image sets are not alike. The dogs are VAR's own outputs, which are in distribution and
   already lie on the model's manifold. The crystals are real photographs. A difference between the two
@@ -470,7 +476,9 @@ the real image). 64 images per dataset, 95% bootstrap CIs (B paired).*
 
 **What it measures.** Fourier Ring Correlation (FRC) is the correlation between two images' Fourier
 coefficients on each ring of spatial frequency r. It is 1 where the images agree and about 0 where they
-are unrelated.
+are unrelated. It measures whether the output still matches the baseline/reference at each frequency,
+not damage or quality: a different but valid image also has low FRC (for example, removing scale 0 in
+free generation gives low FRC but keeps top-1 at 0.911).
 
 **Method** (`frc.py`, CPU only):
 - Each image is converted to 256×256 luminance, made zero-mean, multiplied by a 2D Hann window, and
@@ -516,24 +524,24 @@ Outputs:
 Dashed lines mark n_k/2; the solid line marks the end of the latent band.*
 
 **Observations** (`results/frc.csv`, `results/frc_bands.csv`):
-- **Mainly above n_k/2, not below.** For every arm of scales 1-8 in all three panels, mean FRC over the
-  latent rings above n_k/2 is lower than over the rings at or below it. Scales 0 and 9 have latent
-  rings on one side of n_k/2 only, so they can't be compared this way. Examples:
-  - ImageNet scale 3: 0.62 at r ≤ 1.5, 0.07 at r = 2-8;
-  - crystal scale 5: 0.78 at r ≤ 3, 0.15 at r = 4-8;
-  - dog scale 3: 0.82 vs 0.39.
-
-  Removing a scale changes the frequencies the later, finer scales would build on. The decoder band
-  stays low in every arm: 0.01-0.36 on ImageNet, 0.05-0.37 on dogs, 0.05-0.32 on crystals.
-- **Free generation vs teacher forcing differ at the coarse end:**
-  - **ImageNet:** removing scale 0, 1 or 2 gives a different image at almost every frequency. FRC at
-    r = 1 is 0.35-0.44, and the latent band is 0.08-0.09 [CIs 0.06-0.11].
-  - **Phase F:** the real scales 0-5 pin the layout. FRC at r = 1 stays at 0.83 or higher for every
-    arm (lowest: 0.828, crystals scale 1).
-  - **Where the latent band bottoms out:** on ImageNet it is lowest at scales 0-2 and rises steadily
-    to 0.91 at scale 9. On Phase F it is lowest in the middle: crystals 0.39 [0.35, 0.43] at scale 5,
-    dogs 0.48-0.50 at scales 3-5. It is higher at both ends, for example crystals 0.55 at scale 0 and
-    0.85 at scale 9.
+- **Main claim (panel C, ImageNet free generation): mainly above n_k/2, not below.** For every arm of
+  scales 1-8, mean FRC over the latent rings above n_k/2 is lower than over the rings at or below it;
+  for example, scale 3 gives 0.62 at r ≤ 1.5 and 0.07 at r = 2-8. In free generation, removing a scale
+  changes the finer frequencies built on it; the output does not return to the baseline.
+  - Removing scale 0, 1 or 2 gives a different image at almost every frequency: FRC at r = 1 is
+    0.35-0.44, and the latent band is 0.08-0.09 [CIs 0.06-0.11]. The latent band then rises steadily
+    to 0.91 at scale 9.
+  - Scales 0 and 9 have latent rings on one side of n_k/2 only, so they can't be split this way.
+  - The decoder band stays low in every arm: 0.01-0.36.
+- **Phase F (panels A, B) is harder to read.** The real tokens refill the coarse layout, so the pattern
+  across scales is not monotonic:
+  - FRC at r = 1 stays at 0.83 or higher for every arm (lowest: 0.828, crystals scale 1).
+  - The latent band is lowest in the middle of the ladder, not at the start: crystals 0.39
+    [0.35, 0.43] at scale 5, dogs 0.48-0.50 at scales 3-5. It is higher at both ends, for example
+    crystals 0.55 at scale 0 and 0.85 at scale 9.
+  - The above-vs-below-n_k/2 split holds here too for scales 1-8 (crystal scale 5: 0.78 at r ≤ 3,
+    0.15 at r = 4-8; dog scale 3: 0.82 vs 0.39). Decoder band: 0.05-0.37 on dogs, 0.05-0.32 on
+    crystals.
 - **Against the real image:** the reference already has latent-band FRC 0.44 (crystals) and 0.65
   (dogs), and decoder-band FRC 0.02 and 0.06. Removing a scale lowers the latent band most at scales
   4-5 for crystals (0.33) and scales 3-5 for dogs (0.42-0.45). For crystals, removing scales 6-9
