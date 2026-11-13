@@ -19,7 +19,15 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `plot_heatmap.py` | Figure 1c: per-class drop in top-1 for every VAR single-scale, VAR 2-scale and DiT arm |
 | `jobs/p3_both.env` | Baselines only, both models, with P3's observe hooks (P3 ride-along) |
 | `compare_p3_var.py` | Checks two P3 VAR snapshot folders are identical, file by file |
-| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below) |
+| `make_seed2_manifest.py`, `manifests/seed2.csv` | Phase E: the second seed set (same classes and layout as v1.1, master seed 61320018) |
+| `jobs/seed2_var_single.env`, `jobs/seed2_var_groups.env`, `jobs/seed2_dit.env` | Phase E: single scales, VAR groups and DiT bands on seed set 2 |
+| `compare_seeds.py` | Phase E: seed set 1 vs seed set 2, per arm, plus rank agreement |
+| `select_crystals.py` | Phase F: picks the 64 OpenCrystalData images (32 per magnification, evenly spaced over the sorted file list); the images are not in the repo |
+| `make_dog64.py` | Phase F: copies 64 VAR baseline PNGs (all 7 classes) to a folder outside the repo, with `dog64_list.csv` |
+| `jobs/transfer_var.pbs` | Phase F: VAR scale removal on real images, one dataset per job, with codec and hook checks |
+| `transfer_summary.py` | Phase F: `pair` (per-arm change vs the reference, run in the job) and `summary` (CSV + Figure 1d) |
+| `frc.py` | Fourier Ring Correlation of each removal arm vs its reference / baseline / the real image, by frequency (Figure 1e) |
+| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png`; FRC adds `frc.csv`, `frc_bands.csv`, `fig1e_frc.png` |
 
 ## What "removal" means
 
@@ -224,6 +232,321 @@ Observations (not conclusions):
   0.482.
 - Every 2-scale window has a lower top-1 than either of its two single-scale arms (point estimates;
   for {0,1}, 0.906 against 0.911 and 0.920, within the CIs).
+
+## Phase E: second seed set
+
+**Why.** Every result above uses one set of 224 images (manifest v1.1). Their CIs cover resampling
+those images, not drawing new ones. A second, independent seed set checks whether the scale ranking, the
+top scales and the DiT band order are properties of the models or of these 224 images.
+
+**Manifest.** `make_seed2_manifest.py` writes `manifests/seed2.csv`:
+- same 7 classes and per-image layout as v1.1: 32 images per class, class 151 first, header `class_id,seed`;
+- master seed 61320017 + 1 = 61320018, seeds from v1.1's own `derive_seeds`;
+- 224 unique seeds, none shared with `manifest/frozen_v1_1.csv` (the script checks this and stops
+  otherwise);
+- LF line endings, byte-identical on re-run (sha256 `85fe1715fb71…`).
+
+**Jobs.** All three use `KEEP_RAW=0`, `QUALITY=1` and `P3_RIDEALONG=0`. There is no reference baseline
+for these seeds, so `BASELINE_REF` points at a path that does not exist (`outputs/baseline/none_for_seed2`)
+and the hash check reports SKIPPED, which `gateb.pbs` does not count as a failure. Pairing within each
+job is still checked against that job's own baseline.
+
+```bash
+python -m lanes.p1.make_seed2_manifest                                        # once; already in the repo
+qsub -v SETTINGS=lanes/p1/jobs/seed2_var_single.env lanes/p1/jobs/gateb.pbs   # scales 0-9 alone, ~8 min
+qsub -v SETTINGS=lanes/p1/jobs/seed2_var_groups.env lanes/p1/jobs/gateb.pbs   # {0,1,2} {3,4,5} {7,8,9}, ~3 min
+qsub -v SETTINGS=lanes/p1/jobs/seed2_dit.env lanes/p1/jobs/gateb.pbs          # DiT 1-83 84-166 167-249, ~25 min
+```
+
+These estimates come from the seed-1 jobs' `steps.tsv` and exclude job start-up.
+
+**What will be compared.** Seed 1 uses jobs 25893211 + 25916920 (single scales), 25893212 (groups) and
+25893213 (DiT):
+
+```bash
+python -m lanes.p1.compare_seeds --single <JOB> --groups <JOB> --dit <JOB>
+```
+
+The jobs can be given as they finish. It writes two new files and never touches the existing results:
+- `results/seed2_results.csv`: same columns as `results_sweep.csv`.
+- `results/seed_compare.csv`: one row per arm, matched on the scales or steps removed. For top-1 and
+  `cls_prob` it gives the drop on each seed set with its paired 95% CI, and the difference
+  (seed 2 − seed 1) with a 95% CI from resampling the two image sets independently.
+
+It also prints:
+- the Spearman rho between the two seed sets' rankings of the 10 single scales by `cls_prob` drop;
+- the top-3 scales on each seed set (seed 1: 3, 2, 4);
+- the DiT band order on each seed set (seed 1: late > mid > early).
+
+The script stops if the two seed sets share an image.
+
+**Jobs run.** All three report `RESULT: OK` with manifest sha256 `85fe1715fb71…` and the hash check
+SKIPPED, as intended.
+
+| Job | Settings | Arms |
+|---|---|---|
+| 26203723 | `seed2_var_single.env` | scales 0-9 alone |
+| 26203724 | `seed2_var_groups.env` | {0,1,2}, {3,4,5}, {7,8,9} |
+| 26203725 | `seed2_dit.env` | DiT 1-83, 84-166, 167-249 |
+
+The seed-2 VAR baselines of 26203723 and 26203724 are byte-identical: 224/224 `tensor_sha256`, checked on
+NSCC and again from the two `run.json` files. That is the same check the seed-1 jobs pass against
+`outputs/baseline/25665469`.
+
+**Results** (`results/seed2_results.csv`: 19 runs; `results/seed_compare.csv`: 16 arms).
+
+```bash
+python -m lanes.p1.compare_seeds --single 26203723 --groups 26203724 --dit 26203725
+```
+
+- Baselines: VAR top-1 0.929 on seed 2 vs 0.942 on seed 1; DiT 0.862 vs 0.906.
+- Single VAR scales:
+  - Ranked by `cls_prob` drop, the order is the same on both seed sets: 3, 2, 4, 6, 9, 7, 5, 8, 1, 0
+    (Spearman rho = 1.000).
+  - Two neighbouring pairs are close on seed 2: scale 4 0.244 vs scale 6 0.243, and scale 5 0.111 vs
+    scale 8 0.110.
+  - Top-3: scales 3, 2, 4 on both (seed 1: 0.466, 0.346, 0.247; seed 2: 0.488, 0.315, 0.244).
+  - Scales 0 and 1 have a top-1 drop whose CI includes 0 on both seed sets.
+- VAR groups (top-1, seed 1 → seed 2):
+  - {0,1,2} and {3,4,5} give top-1 0.000 on both seed sets, so their drop equals the baseline: 0.942 on
+    seed 1, 0.929 on seed 2.
+  - {7,8,9} gives top-1 0.107 on seed 1 and 0.094 on seed 2, a drop of 0.835 on both.
+  - All six differences (3 groups × top-1 and `cls_prob`) have CIs that include 0.
+- DiT order by `cls_prob` drop:
+  - seed 1: late (0.266) > mid (0.187) > early (0.078);
+  - seed 2: late (0.238) > mid (0.219) > early (−0.026).
+  - On seed 2, skipping the early steps leaves top-1 at or above baseline (drop −0.022, CI −0.085 to
+    0.040).
+- 5 of the 32 seed 2 − seed 1 differences (16 arms × top-1 and `cls_prob`) have a 95% CI that excludes
+  0, without multiple-comparison correction; about 1-2 are expected by chance at 95%. The single-scale
+  ranking is unchanged (rho = 1.0). The five are:
+
+  | Arm | Measure | Difference [95% CI] |
+  |---|---|---|
+  | scale 8 | top-1 | +0.080 [0.018, 0.143] |
+  | scale 8 | `cls_prob` | +0.054 [0.012, 0.096] |
+  | scale 9 | top-1 | +0.103 [0.027, 0.179] |
+  | DiT early | top-1 | −0.103 [−0.183, −0.022] |
+  | DiT early | `cls_prob` | −0.104 [−0.176, −0.029] |
+
+  Scale 9's `cls_prob` difference has a CI that includes 0 (+0.040 [−0.011, 0.091]). All the other
+  differences, including scales 2 and 3 and DiT mid and late, have CIs that include 0.
+
+## Phase F: transfer to crystals
+
+**Question.** Does removing one VAR scale do the same thing to a real image as to VAR's own generations?
+The design matches P2's VAR Phase F (`lanes/p2/results/phasef/README.md`), so the two lanes' results can
+be compared.
+
+**Design** (`jobs/transfer_var.pbs`, VAR only):
+- **Real tokens:** the real image's VQ tokens are teacher-forced at scales 0-5 (`lanes/p2/transfer.py:real_h`,
+  `P2_REAL_STAGE=5`), and VAR-d20 generates scales 6-9.
+- **Model settings:** cfg 0 (`lanes/p2/jobs/var_cfg0.yaml`), every row conditioned on class 0, as P2. The
+  manifest comes from `python -m lanes.p2.transfer manifest`.
+- **Arms:** a reference with no removal, and scale j removed alone for each j = 0..9
+  (`lanes/p1/hooks.py:remove_scales`, `P1_VAR_SCALES=j`). Both hooks are on the same run. Removing j ≤ 5
+  drops a real scale; removing j ≥ 6 drops a generated one.
+- **Checks per dataset, before the arms:**
+  - **(a) Codec:** `transfer recon --model var`, the VQ tokenizer's reconstruction.
+  - **(b) Real scales 0-9, no removal:** must reproduce (a) to within 0.1 dB of mean PSNR (`CHECK_TOL`).
+    P2's pilot gave 26.16 vs 26.19 dB. If (b) fails, the job stops and exits 1.
+  - **Hooks:** the j = 3 arm runs first. Its `run.json` must list both hooks, and every image must differ
+    from the reference (`tensor_sha256`) with the same random draws (`generator_state_sha256`).
+    Otherwise the job stops.
+- **Scores per image:**
+  - PSNR to the real image and `hf_ratio` (`transfer score`), as P2;
+  - PSNR and mean absolute difference (0-255) between each arm's output and the reference's output for
+    the same image. This is how much removing scale j changes the result, whatever VAR's fidelity to
+    the real image (`transfer_summary.py pair`).
+- **Raw tensors:** each run's `*.pt` are deleted once it is scored.
+
+**Datasets.** Both use identical settings (class 0, cfg 0, real scales 0-5), so only the image domain
+differs.
+- **Crystals** (`~/data_crystal_64_p1` on NSCC): OpenCrystalData, "In-line Image Characterization using
+  EasyViewer" (Barhate et al., Digital Chemical Engineering, 2024; CC-BY-SA-4.0;
+  https://www.kaggle.com/datasets/opencrystaldata/easyviewer-based-image-characterization).
+  - `select_crystals.py` takes 32 images per magnification (x100, x400), evenly spaced over each
+    magnification's sorted file list: 5 Glutamic Acid + 27 Wollastonite per magnification.
+  - Its `sources.csv` sits in the same folder. It is not an image, and `transfer.py` lists only image
+    files, so it is ignored.
+- **Dogs** (`~/data_dog64_p1`): 64 of VAR-d20's clean baseline PNGs (`outputs/baseline/25665469/var_d20`).
+  - `make_dog64.py` sorts the rows of `manifest/frozen_v1_1.csv` by (class_id, seed) and takes positions
+    round(i × 223 / 63), i = 0..63. That gives 9 or 10 images from each of the 7 classes.
+  - It names them `dog01_…` to `dog64_…` so name order is pick order, and writes `dog64_list.csv`. The
+    script uses the standard library only and runs on the login node.
+
+**Submit** (from the repo root on NSCC; use `$HOME`, not `~`, inside `-v`):
+
+```bash
+python lanes/p1/make_dog64.py ~/data_dog64_p1                     # login node, once
+qsub -v REAL_DIR=$HOME/data_crystal_64_p1,DATASET=crystal lanes/p1/jobs/transfer_var.pbs
+qsub -v REAL_DIR=$HOME/data_dog64_p1,DATASET=dog lanes/p1/jobs/transfer_var.pbs
+python -m lanes.p1.transfer_summary summary --crystal <JOB> --dog <JOB>   # laptop, after copying both jobs
+```
+
+Estimated runtime is about 6-8 min per job, plus start-up. This is scaled from P1's 224-image VAR runs
+(~29 s per generate step):
+- 12 generate runs of 64 images at ~15-20 s each, including model load and tokenizing;
+- the codec check, ~0.5 min;
+- scoring and pairing, a few seconds per run.
+
+Each job writes `outputs/p1/<JOBID>/`: `dataset.txt`, `manifest.csv`, `recon/`, `check_k9/`, `reference/`
+and `remove_s0` … `remove_s9`, each with PNGs, `run.json`, `transfer.csv` and, for arms,
+`vs_reference.csv`. It also writes `steps.tsv` and `summary.txt`, which reports check (b), the hook check
+and per-run means.
+
+`transfer_summary.py summary` writes:
+- **`results/transfer_var.csv`:** one row per dataset and run. Columns: mean PSNR to the real image with
+  its CI; the PSNR drop vs the reference with a 95% paired bootstrap CI; mean `hf_ratio`; and PSNR and MAD
+  vs the reference, each a mean with its CI. All CIs use 10000 resamples, seed 0.
+- **`results/fig1d_transfer.png`:** change vs removed scale for crystals and dogs, with CI bars and
+  scales 0-5 shaded as real. Panel A is MAD vs the reference; panel B is the PSNR drop to the real image.
+
+**Jobs run.** Both on commit 8d58785, `RESULT: OK`, every step exit 0. Generate steps took 13-19 s per run.
+
+| Job | Dataset | (a) codec | (b) real scales 0-9 | Difference | Hook check |
+|---|---|---|---|---|---|
+| 26205157 | crystals (`~/data_crystal_64_p1`, 64 images) | 26.40 dB | 26.37 dB | −0.030 dB | PASS: 64/64 differ, all paired |
+| 26205158 | dogs (`~/data_dog64_p1`, 64 images) | 25.40 dB | 25.38 dB | −0.016 dB | PASS: 64/64 differ, all paired |
+
+```bash
+python -m lanes.p1.transfer_summary summary --crystal 26205157 --dog 26205158
+```
+
+![Figure 1d](results/fig1d_transfer.png)
+
+*Figure 1d. VAR-d20 with real tokens at scales 0-5, one scale removed at a time. A: mean absolute change
+vs the no-removal reference output. B: PSNR lost to the real image vs the reference (negative = closer to
+the real image). 64 images per dataset, 95% bootstrap CIs (B paired).*
+
+**Observations** (`results/transfer_var.csv`):
+- **Reference:** with real scales 0-5 and no removal, PSNR to the real image is 19.84 dB for crystals and
+  16.81 dB for dogs.
+- **Change vs the reference (A):**
+  - Crystals show the same pattern as dogs under the same teacher-forced setup: the change falls from
+    the early scales to the late ones.
+  - Crystals: removing scale 0 changes the output most (MAD 44.3), then 25.5 at scale 1, down to 8.8
+    at scale 9. Scales 4 and 5 are level (16.1 and 16.3).
+  - This scale-0 result applies to teacher forcing only. In free generation (the main ImageNet runs),
+    removing scale 0 or 1 is harmless: top-1 0.911 and 0.920 against 0.942 for the baseline, with
+    drop CIs that include 0.
+  - Dogs: scales 0 and 1 are level (34.3 and 34.4), falling to 12.7 at scale 9.
+  - Dogs change more than crystals at every removed scale except 0 (crystals 44.3, dogs 34.3).
+  - No image is identical to its reference in any arm (`n_identical` 0).
+- **PSNR to the real image (B):**
+  - Crystals show the same pattern as dogs under the same teacher-forced setup: removing a real scale
+    (0-4) lowers it, with CIs above 0. On crystals the drop is
+    6.32 dB at scale 0, 3.63 at 1, 2.56 at 2, 1.44 at 3 and 0.33 at 4. On dogs it is 2.08-2.79 dB at
+    scales 0-3 and 1.48 at 4.
+  - Scale 5: crystals 0.09 dB, with a CI that includes 0 (−0.12 to 0.31); dogs 1.28 dB.
+  - Removing a generated scale raises PSNR to the real image in 7 of 8 cases, all with CIs below 0:
+    crystals −0.48 to −0.75 dB at scales 6-9, dogs −0.15 to −0.46 dB at scales 7-9.
+  - The exception is dogs at scale 6: +0.19 dB, CI 0.003 to 0.39.
+- **Texture (`hf_ratio`):**
+  - Crystals: the reference is 0.94. Removing scales 0-2 raises it to 1.25-1.59, and removing scales
+    3-9 lowers it to 0.59-0.79.
+  - Dogs: the reference is 0.86. Removing scales 0-1 raises it to 1.16 and 1.02, and removing scales
+    2-9 gives 0.70-0.85.
+
+**Limits.**
+- VAR only. P2's DiT transfer starts at t197, which comes after P1's early and mid DiT bands, so those
+  bands cannot be removed from a real-image start.
+- PSNR, not a classifier: the crystals have no ImageNet class, so the classifier top-1 drop used
+  elsewhere in P1 does not apply.
+- This setup tests the coarse-to-fine gradient, not the recognition peak at scales 2-3 found on
+  ImageNet. Two reasons:
+  - Scales 0-5 are teacher-forced from the real image, so the later scales cannot make up for a removed
+    coarse scale. In free generation they can: removing scale 0 or 1 there was harmless (top-1 drop CIs
+    include 0).
+  - PSNR rewards global colour and layout, which the coarse scales carry.
+
+  Crystals show the same pattern as dogs under the same teacher-forced setup. Even the dogs, VAR's own
+  images, show scales 0-1 costing about as much as 2-3: PSNR drop 2.53 / 2.79 dB vs 2.17 / 2.09 dB, and
+  MAD 34.3 / 34.4 vs 31.8 / 31.8. So the scale-0 cost here applies to teacher forcing only.
+- Class 0 conditioning for both datasets; the model is pulled towards class 0 in both.
+- The two image sets are not alike. The dogs are VAR's own outputs, which are in distribution and
+  already lie on the model's manifold. The crystals are real photographs. A difference between the two
+  therefore mixes "real vs generated" with "dogs vs crystals".
+- The reconstruction ceiling is the VQ codec (P2: about 26.2-26.5 dB on crystals), so compare drops and
+  changes, not absolute PSNR.
+- `psnr_vs_ref` is capped at 99 dB for an image identical to the reference; `n_identical` in the CSV
+  counts these.
+
+## FRC: which frequencies a removed scale changes
+
+**What it measures.** Fourier Ring Correlation (FRC) is the correlation between two images' Fourier
+coefficients on each ring of spatial frequency r. It is 1 where the images agree and about 0 where they
+are unrelated. It measures whether the output still matches the baseline/reference at each frequency,
+not damage or quality: a different but valid image also has low FRC (for example, removing scale 0 in
+free generation gives low FRC but keeps top-1 at 0.911).
+
+**Method** (`frc.py`, CPU only):
+- Each image is converted to 256×256 luminance, made zero-mean, multiplied by a 2D Hann window, and
+  Fourier-transformed.
+- FRC(r) = Re Σ F1·F2* / √(Σ|F1|² · Σ|F2|²) over rings 1 cycle/image wide, r = 1..128.
+- Each pair is summarised over two bands: the **latent band**, r = 1-8 (up to 8 cycles, the most VAR's
+  16×16 token grid can carry), and the **decoder band**, r = 9-128.
+
+**Scale-to-frequency mapping.** Scale k has an n_k × n_k grid (n_k = 1, 2, 3, 4, 5, 6, 8, 10, 13, 16), so it
+can carry up to n_k/2 cycles/image: 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6.5, 8.
+
+**Comparisons.** Every arm reports the mean curve over images and band means with 95% bootstrap CIs
+over images (10000 resamples, seed 0).
+- **Phase F** (26205157 crystals, 26205158 dogs, 64 images each): `remove_s0`-`s9` vs the reference
+  run; and the reference and each arm vs the real image.
+- **ImageNet free generation** (seed set 1, 224 images): `remove_s0`-`s9` vs their own job's baseline,
+  paired by (class_id, seed). Scales 0 and 9 come from 25893211, scales 1-8 from 25916920.
+- **Matching the real images:**
+  - Dogs: the list is re-derived with `make_dog64.py`'s rule.
+  - Crystals: read from `../crystal_64_p1`.
+  - The script stops unless the image names in each job's `transfer.csv` match the 64 local files.
+
+**Sanity check** (printed on every run):
+- An image against itself gives FRC = 1.000000 at every r (16 images).
+- Unrelated pairs (baseline image i vs i + 32, another class and seed; 224 pairs) give mean FRC +0.004
+  over r = 1-8 and +0.002 over r = 9-128.
+- A few rings are the exception, reaching up to 0.13: r = 91, 100-102 and 127-128. These are the
+  narrow peaks visible in every panel of Figure 1e. All VAR outputs share them, whatever the content.
+
+```bash
+python -m lanes.p1.frc        # ~2.5 min on the laptop; needs Pillow, numpy, matplotlib (python3 here)
+```
+
+Outputs:
+- `results/frc.csv`: one row per (comparison, dataset, arm, r), 6656 rows.
+- `results/frc_bands.csv`: one row per (comparison, dataset, arm), 52 rows.
+- `results/fig1e_frc.png`.
+
+![Figure 1e](results/fig1e_frc.png)
+
+*Figure 1e. FRC of each removal arm against the run without removal, by spatial frequency. A, B: Phase F
+(real tokens at scales 0-5), against the reference. C: ImageNet free generation, against the baseline.
+Dashed lines mark n_k/2; the solid line marks the end of the latent band.*
+
+**Observations** (`results/frc.csv`, `results/frc_bands.csv`):
+- **Main claim (panel C, ImageNet free generation): mainly above n_k/2, not below.** For every arm of
+  scales 1-8, mean FRC over the latent rings above n_k/2 is lower than over the rings at or below it;
+  for example, scale 3 gives 0.62 at r ≤ 1.5 and 0.07 at r = 2-8. In free generation, removing a scale
+  changes the finer frequencies built on it; the output does not return to the baseline.
+  - Removing scale 0, 1 or 2 gives a different image at almost every frequency: FRC at r = 1 is
+    0.35-0.44, and the latent band is 0.08-0.09 [CIs 0.06-0.11]. The latent band then rises steadily
+    to 0.91 at scale 9.
+  - Scales 0 and 9 have latent rings on one side of n_k/2 only, so they can't be split this way.
+  - The decoder band stays low in every arm: 0.01-0.36.
+- **Phase F (panels A, B) is harder to read.** The real tokens refill the coarse layout, so the pattern
+  across scales is not monotonic:
+  - FRC at r = 1 stays at 0.83 or higher for every arm (lowest: 0.828, crystals scale 1).
+  - The latent band is lowest in the middle of the ladder, not at the start: crystals 0.39
+    [0.35, 0.43] at scale 5, dogs 0.48-0.50 at scales 3-5. It is higher at both ends, for example
+    crystals 0.55 at scale 0 and 0.85 at scale 9.
+  - The above-vs-below-n_k/2 split holds here too for scales 1-8 (crystal scale 5: 0.78 at r ≤ 3,
+    0.15 at r = 4-8; dog scale 3: 0.82 vs 0.39). Decoder band: 0.05-0.37 on dogs, 0.05-0.32 on
+    crystals.
+- **Against the real image:** the reference already has latent-band FRC 0.44 (crystals) and 0.65
+  (dogs), and decoder-band FRC 0.02 and 0.06. Removing a scale lowers the latent band most at scales
+  4-5 for crystals (0.33) and scales 3-5 for dogs (0.42-0.45). For crystals, removing scales 6-9
+  leaves it within 0.02 of the reference. For dogs, removing scales 7-9 leaves it within 0.04; scale 6
+  gives 0.54.
 
 ## How to run
 
