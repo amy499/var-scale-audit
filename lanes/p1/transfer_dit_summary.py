@@ -120,7 +120,7 @@ def plot(rows: list[dict], path: Path, jobs: dict):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
     fig.patch.set_facecolor(SURFACE)
     panels = (("mad_vs_ref", "A  Change vs the reference output", "mean |arm − reference| (0–255)"),
-              ("psnr_drop", "B  PSNR lost to the real image", "PSNR drop vs reference (dB)"))
+              ("psnr_drop", "B  PSNR change to the real image (negative = closer)", "PSNR change to real image (dB)"))
     for ax, (col, title, ylabel) in zip(axes, panels):
         ax.set_facecolor(SURFACE)
         for side in ("top", "right"):

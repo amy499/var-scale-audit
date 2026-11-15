@@ -479,7 +479,8 @@ the real image). 64 images per dataset, 95% bootstrap CIs (B paired).*
 
 **Question.** Does skipping a band of DiT steps do the same thing to a real image as to DiT's own
 generations? This is the DiT counterpart of the VAR Phase F above. It is exploratory: the start it needs
-is one P2 found unreliable for real images (see *Expected* below). **Not run yet; no results.**
+is one P2 found unreliable for real images (see *Expected* below). Jobs 26265701 (crystals) and 26265702
+(dogs); results under *Jobs run* below.
 
 **Design** (`jobs/transfer_dit.pbs`, structured like `transfer_var.pbs`):
 - **Model settings:** DiT-XL/2, cfg 1 (`lanes/p2/jobs/dit_cfg1.yaml`, so guidance does not pull towards the
@@ -558,6 +559,59 @@ Walltime is 1 h.
 - **`results/fig1g_transfer_dit.png`:** A, MAD vs the reference; B, PSNR drop to the real image. Each panel
   shows `skip_mid` and `skip_late` for crystals vs dogs, with 95% CI bars.
 - It refuses to overwrite existing outputs.
+
+**Jobs run.** Both on commit d971826, `RESULT: OK`, every step exit 0. Start step 83 = t666 in both;
+`skip_mid` = t662-t333, `skip_late` = t329-t0. Generate steps took 84-89 s for the reference and 61-66 s
+per arm.
+
+| Job | Dataset | (a) codec | Check (b) |
+|---|---|---|---|
+| 26265701 | crystals (`~/data_crystal_64_p1`, 64 images) | 29.68 dB | PASS: 64/64 differ, all paired |
+| 26265702 | dogs (`~/data_dog64_p1`, 64 images) | 27.02 dB | PASS: 64/64 differ, all paired |
+
+```bash
+python -m lanes.p1.transfer_dit_summary --crystal 26265701 --dog 26265702
+```
+
+![Figure 1g](results/fig1g_transfer_dit.png)
+
+*Figure 1g. DiT-XL/2 from the real latent noised to t666, one 83-step band skipped. A: mean absolute change
+vs the no-skip reference output. B: PSNR to the real image, reference minus arm (negative = the arm is
+closer to the real image than the reference). 95% bootstrap CIs over 64 images (B: paired).*
+
+**Observations** (`results/transfer_dit.csv`; mean [95% CI]):
+- **The reference is far from the real image, as expected at t666.**
+
+  | | Codec (VAE only) | Reference from t666 | hf_ratio of the reference |
+  |---|---|---|---|
+  | Crystals | 29.68 dB | 12.07 [11.58, 12.59] dB | 3.42 |
+  | Dogs | 27.02 dB | 10.18 [9.86, 10.48] dB | 3.61 |
+
+  - That is 17-18 dB below the codec on both datasets.
+  - `hf_ratio` 3.4-3.6 means the reference has 3.4-3.6x the real image's high-frequency energy.
+- **Skipping the mid band changes the output about twice as much as skipping the late band.**
+
+  | | MAD vs reference, mid | MAD vs reference, late | PSNR vs reference, mid | PSNR vs reference, late |
+  |---|---|---|---|---|
+  | Crystals | 40.17 [37.15, 43.05] | 19.88 [18.25, 21.51] | 13.90 dB | 19.44 dB |
+  | Dogs | 47.30 [45.42, 49.16] | 24.04 [22.80, 25.24] | 12.56 dB | 18.00 dB |
+
+  No image is identical to the reference in either arm.
+- **Dogs change more than crystals in both arms.** The MAD CIs do not overlap: mid 47.30 vs 40.17, late
+  24.04 vs 19.88.
+- **Both skips bring the output slightly closer to the real image, not further.**
+  - `psnr_drop` (reference minus arm) is negative throughout, and every CI excludes 0:
+
+    | | Mid | Late |
+    |---|---|---|
+    | Crystals | −1.80 [−2.18, −1.44] dB | −1.03 [−1.17, −0.88] dB |
+    | Dogs | −1.11 [−1.41, −0.83] dB | −0.88 [−0.99, −0.78] dB |
+
+  - Every arm is still only 11.1-13.9 dB from the real image.
+  - Closer is not better: skipping steps leaves less of DiT's own generated content, so outputs drift
+    slightly less far from the real image; all arms remain 11-14 dB from it.
+- **Texture moves in opposite directions.** Compared with the reference (3.42 / 3.61), `skip_mid` raises
+  `hf_ratio` to 4.24 / 3.99 (crystals / dogs) and `skip_late` lowers it to 2.93 / 2.77.
 
 **Limits:**
 - **One start, so no early band.** Skipping early steps would need an earlier start, which the real image
