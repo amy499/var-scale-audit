@@ -27,10 +27,12 @@ sys.path.insert(0, str(REPO))
 
 from lanes.p1.summarize import N_BOOT, SEED, _removal, _write, job_dir, load_job  # noqa: E402
 from lanes.p2.analyze import kid  # noqa: E402
-from lanes.p3.p3_metrics import FIDELITY_LOW, KID_HIGH, VALIDITY_LOW, classify, fidelity_incep  # noqa: E402
+from lanes.p3.p3_metrics import (FIDELITY_LOW, KID_HIGH, VALIDITY_LOW, classify, cosine_distance,  # noqa: E402
+                                 fidelity_incep, load_features)
 
 JOBS = {"25893211": 1, "25893212": 1, "25893213": 1, "25916920": 1, "25916921": 1,
         "26203723": 2, "26203724": 2, "26203725": 2}
+SHIFT = 32  # mismatched-pairing check: one class block (32 seeds per class)
 CELLS = ("unchanged", "re-routed", "degraded-in-place", "damaged")
 THRESHOLDS = (f"P3 provisional: FIDELITY_LOW={FIDELITY_LOW}, VALIDITY_LOW={VALIDITY_LOW}, "
               f"KID_HIGH={KID_HIGH} (lanes/p3/p3_metrics.py)")
@@ -57,8 +59,11 @@ def runs_of(job: Path):
 
 
 def sanity(jobs) -> None:
-    """Each job's baseline against itself must give incep_cos 0 for every image."""
-    print("sanity: baseline vs itself (lanes.p3.p3_metrics.fidelity_incep)")
+    """Each job's baseline against itself must give incep_cos 0 for every image; as a reference, each baseline
+    image paired with a DIFFERENT baseline image (rows shifted by SHIFT, so class and seed both differ) gives
+    the incep_cos of unrelated images."""
+    print("sanity: baseline vs itself (lanes.p3.p3_metrics.fidelity_incep), and mismatched baseline pairs "
+          f"(rows shifted by {SHIFT}, cosine_distance)")
     worst = 0.0
     for j in jobs:
         job = job_dir(j)
@@ -66,11 +71,25 @@ def sanity(jobs) -> None:
         for d in base:
             v = np.array([r["value"] for r in fidelity_incep(d, d)])
             worst = max(worst, float(np.max(np.abs(v))))
-            print(f"  {j} {d.parent.name}/{d.name}: n {len(v)}, max |incep_cos| {np.max(np.abs(v)):.2e}, "
-                  f"all exactly 0: {bool(np.all(v == 0))}")
+            m, lo, hi = mismatched(d)
+            print(f"  {j} {d.parent.name}/{d.name}: n {len(v)}, self max |incep_cos| {np.max(np.abs(v)):.2e} "
+                  f"(all exactly 0: {bool(np.all(v == 0))}); mismatched mean {m:.4f} [{lo:.4f}, {hi:.4f}]")
     if worst > 1e-5:
         raise SystemExit(f"FAIL: a baseline is not at incep_cos 0 against itself (max {worst:.2e})")
     print(f"  PASS: max |incep_cos| over all baselines {worst:.2e}")
+
+
+def mismatched(base_dir: Path):
+    """Mean incep_cos (95% bootstrap CI) of baseline image i vs baseline image i+SHIFT (wrapping), keys sorted
+    by (class_id, seed). With 32 seeds per class the partner has another class and another seed."""
+    feats = load_features(base_dir)
+    keys = sorted(feats)
+    part = [keys[(i + SHIFT) % len(keys)] for i in range(len(keys))]
+    if any(a[0] == b[0] or a[1] == b[1] for a, b in zip(keys, part)):
+        raise SystemExit(f"ERROR: {base_dir}: a mismatched pair shares its class or seed")
+    c = np.array([cosine_distance(feats[a], feats[b]) for a, b in zip(keys, part)])
+    bc = c[np.random.default_rng(SEED).integers(0, len(c), size=(N_BOOT, len(c)))].mean(axis=1)
+    return float(c.mean()), float(np.percentile(bc, 2.5)), float(np.percentile(bc, 97.5))
 
 
 def arm_row(j: str, r, run_dir, base_dir, prob, prob_base, fa, fb) -> dict:
@@ -109,6 +128,57 @@ def label(row) -> str:
     return f"s{s[0]}" if len(s) == 1 else "{" + ",".join(s) + "}"
 
 
+def place_labels(fig, ax, pts, ink, muted) -> None:
+    """Greedy label placement in display space: each label goes to the nearest candidate offset whose box
+    overlaps no marker, no placed label, no quadrant name and stays inside the axes; labels placed away from
+    their marker, or whose marker overlaps another marker, get a thin leader line. Most crowded points are
+    placed first."""
+    from matplotlib.transforms import Bbox
+
+    rend = fig.canvas.get_renderer()
+    px = fig.dpi / 72
+    disp = [ax.transData.transform((x, y)) for _, x, y in pts]
+    r_mk = 5.5 * px  # marker half-size (ms 8 plus its ring) in pixels
+    markers = [Bbox.from_extents(u - r_mk, v - r_mk, u + r_mk, v + r_mk) for u, v in disp]
+    taken = [t.get_window_extent(rend).expanded(1.05, 1.2) for t in ax.texts]  # quadrant names
+    inside = ax.get_window_extent(rend)
+    crowd = [sum(np.hypot(*(d - e)) < 40 * px for e in disp) for d in disp]
+    cands = [(rad * np.cos(t), rad * np.sin(t)) for rad in (7, 11, 16, 22, 30, 40, 52, 66)
+             for t in np.deg2rad((30, 150, 210, 330, 0, 180, 90, 270, 60, 120, 240, 300))]
+    for i in sorted(range(len(pts)), key=lambda i: -crowd[i]):
+        name, x, y = pts[i]
+        near = [disp[k] for k, m in enumerate(markers) if k != i and markers[i].overlaps(m)]
+        order = cands
+        if near:  # stacked marker: leader line, label on the side away from the markers it overlaps
+            away = disp[i] - np.mean(near, axis=0)
+            away = away / (np.hypot(*away) or 1)
+            order = sorted((c for c in cands if np.hypot(*c) > 12),
+                           key=lambda c: (round(np.hypot(*c)), -float(np.dot(c, away)) / np.hypot(*c)))
+        best = None
+        for dx, dy in order:
+            ha = "left" if dx > 0.5 else "right" if dx < -0.5 else "center"
+            va = "bottom" if dy > 0.5 else "top" if dy < -0.5 else "center"
+            t = ax.annotate(name, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha, va=va,
+                            fontsize=8, color=ink, zorder=5)
+            bb = t.get_window_extent(rend).expanded(1.08, 1.15)
+            ok = (inside.contains(bb.x0, bb.y0) and inside.contains(bb.x1, bb.y1)
+                  and not any(bb.overlaps(o) for o in taken)
+                  and not any(bb.overlaps(m) for m in markers))
+            if ok:
+                best = (t, bb, np.hypot(dx, dy))
+                break
+            t.remove()
+        if best is None:
+            raise SystemExit(f"ERROR: no free place for label {name}")
+        t, bb, rad = best
+        taken.append(bb)
+        if rad > 12:
+            t.remove()
+            ax.annotate(name, (x, y), xytext=t.xyann, textcoords="offset points", ha=t.get_ha(),
+                        va=t.get_va(), fontsize=8, color=ink, zorder=5,
+                        arrowprops=dict(arrowstyle="-", color=muted, lw=0.6, shrinkA=1, shrinkB=4))
+
+
 def plot(rows, path: Path) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -117,19 +187,19 @@ def plot(rows, path: Path) -> None:
     ink, muted, grid = "#1f1f1e", "#6b6a63", "#e6e5e0"
     kinds = {  # categorical slots 1-3 (validated), plus a marker shape each
         "VAR single scale": ("#2a78d6", "o"),
-        "VAR 2-3 scale window (named in fidelity.csv)": ("#1baf7a", "s"),
+        "VAR 2-3 scale window": ("#1baf7a", "s"),
         "DiT band (83 steps)": ("#eb6834", "^"),
     }
 
     def kind(r):
         if r["model"] == "dit":
             return "DiT band (83 steps)"
-        return "VAR single scale" if int(r["n_removed"]) == 1 else "VAR 2-3 scale window (named in fidelity.csv)"
+        return "VAR single scale" if int(r["n_removed"]) == 1 else "VAR 2-3 scale window"
 
     xmax = max(r["incep_cos_hi"] for r in rows) * 1.08
     ymax = max(1.12, max(r["validity_ratio_hi"] for r in rows) * 1.05)
-    offsets = {"s0": (-20, 6), "s1": (-20, -13), "s7": (-18, 4), "s9": (6, -13), "early": (8, 4)}  # no overlaps
-    fig, axes = plt.subplots(1, 2, figsize=(13, 6.2), sharex=True, sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6.6), sharex=True, sharey=True, dpi=150)
+    pts = {}
     for ax, s in zip(axes, (1, 2)):
         ax.set_facecolor("#fcfcfb")
         for v in ("top", "right"):
@@ -145,6 +215,7 @@ def plot(rows, path: Path) -> None:
                                   ("degraded in place", 0.01, VALIDITY_LOW - 0.03, "left", "top"),
                                   ("damaged", xmax - 0.005, VALIDITY_LOW - 0.03, "right", "top")):
             ax.text(x, y, txt, ha=ha, va=va, fontsize=11, color=muted, style="italic")
+        pts[ax] = []
         for r in (r for r in rows if r["seed_set"] == s):
             colour, marker = kinds[kind(r)]
             x, y = r["incep_cos"], r["validity_ratio"]
@@ -152,9 +223,7 @@ def plot(rows, path: Path) -> None:
                         yerr=[[y - r["validity_ratio_lo"]], [r["validity_ratio_hi"] - y]],
                         fmt=marker, ms=8, color=colour, mec="#fcfcfb", mew=1.5, elinewidth=1.2, capsize=0,
                         zorder=3)
-            if kind(r) != "VAR 2-3 scale window (named in fidelity.csv)":
-                ax.annotate(label(r), (x, y), xytext=offsets.get(label(r), (6, 5)), textcoords="offset points",
-                            fontsize=9, color=ink)
+            pts[ax].append((label(r), x, y))
         ax.set_xlim(0, xmax)
         ax.set_ylim(-0.03, ymax)
         ax.set_title(f"Seed set {s}" + (" (manifest v1.1)" if s == 1 else " (seed2.csv)"),
@@ -169,15 +238,18 @@ def plot(rows, path: Path) -> None:
                  f"thresholds, incep_cos {FIDELITY_LOW}, validity {VALIDITY_LOW})", x=0.01, ha="left",
                  fontsize=12, color=ink)
     fig.tight_layout(rect=(0, 0.05, 1, 0.95))
+    for ax in axes:  # after tight_layout, so display positions are final
+        place_labels(fig, ax, pts[ax], ink, muted)
     fig.savefig(path, dpi=150, facecolor="white")
     print(f"wrote {path.relative_to(REPO)}")
 
 
 def main(argv=None) -> None:
     argv = sys.argv[1:] if argv is None else argv
-    for out in (OUT_CSV, OUT_FIG):
-        if out.exists():
-            raise SystemExit(f"ERROR: {out.relative_to(REPO)} exists; this script only writes new files")
+    if "--sanity-only" not in argv:
+        for out in (OUT_CSV, OUT_FIG):
+            if out.exists():
+                raise SystemExit(f"ERROR: {out.relative_to(REPO)} exists; this script only writes new files")
     sanity(JOBS)
     if "--sanity-only" in argv:
         return

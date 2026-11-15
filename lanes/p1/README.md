@@ -574,11 +574,24 @@ valid image. The two axes together separate "re-routed" from "damaged".
   that image)` without KID, as `lanes/p2/analyze.py` does per image.
 - `outcome_run` is the whole arm's cell, using the means and the arm's KID. KID > 0.005 counts as low validity.
 - **The thresholds are P3's provisional values:** `FIDELITY_LOW` 0.30, `VALIDITY_LOW` 0.50, `KID_HIGH`
-  0.005. Each row of the CSV states this.
+  0.005. Each row of the CSV states this. For scale, two unrelated images sit at about 0.55 (the
+  mismatched-pairing check below), so 0.30 is a little over half of that distance.
 
-**Sanity check** (printed on every run): each baseline against itself gives `incep_cos` of at most
-1.2e-07 for all 224 images, in all 8 jobs. That is 0 to float32 precision: the features are stored as
-float32.
+**Sanity checks** (printed on every run; `--sanity-only` runs just these):
+- **Self-pairing:** each baseline against itself gives `incep_cos` of at most 1.2e-07 for all 224 images,
+  in all 8 jobs. That is 0 to float32 precision: the features are stored as float32.
+- **Mismatched pairing:** each baseline image paired with a different baseline image (rows sorted by
+  (class_id, seed) and shifted by 32, so every pair differs in both class and seed) gives the
+  `incep_cos` of unrelated images. Mean with a 95% bootstrap CI over the 224 pairs:
+
+  | Seed set | VAR baseline | DiT baseline |
+  |---|---|---|
+  | 1 | 0.563 [0.556, 0.571] | 0.557 [0.549, 0.565] |
+  | 2 | 0.548 [0.540, 0.555] | 0.553 [0.544, 0.561] |
+
+  So unrelated images sit at 0.55-0.56, slightly above the ~0.52 P3 expected. The strongest removals are
+  as far from their baseline as an unrelated image: {0,1,2} 0.578 (seed set 1) and 0.582 (seed set 2),
+  {2,3} 0.571, {1,2} 0.553, {3,4,5} 0.546 and 0.538.
 
 ```bash
 python3 -B -m lanes.p1.fidelity     # ~20 s on the laptop; needs numpy, matplotlib
@@ -591,8 +604,9 @@ Outputs:
 ![Figure 1f](results/fig1f_fidelity.png)
 
 *Figure 1f. Validity vs fidelity per removal arm, seed set 1 (left) and seed set 2 (right), with 95%
-bootstrap CIs. Dashed lines are P3's provisional thresholds. The VAR window and group points are named in
-`fidelity.csv`.*
+bootstrap CIs. Dashed lines are P3's provisional thresholds. Every point is labelled (s = single VAR
+scale, {..} = VAR window or group, early/mid/late = DiT band); a thin leader line joins a label to its point
+when the point overlaps another marker or the label had to move away from it.*
 
 **Observations** (`results/fidelity.csv`):
 - **Group removals are damage, not re-routing.**
@@ -604,8 +618,9 @@ bootstrap CIs. Dashed lines are P3's provisional thresholds. The VAR window and 
   - Per image, 68-77% are unchanged, 14-20% re-routed and 7-9% damaged.
   - Scale 3, by contrast, puts 53% (seed 1) and 57% (seed 2) of images in "damaged".
 - **The late single scales and DiT differ in which cell they move images to.**
-  - Late VAR scales: scales 5, 7, 8 and 9 have the lowest mean `incep_cos` (0.088-0.159). Images that leave
-    "unchanged" go mostly to "degraded in place" (10-28%), not to "re-routed" (0-1.3%).
+  - Late VAR scales 5, 7, 8 and 9 are mostly unchanged: 68-89% of images (78-89% on seed set 1, 68-81% on
+    seed set 2), with the lowest mean `incep_cos` (0.088-0.159). The rest are mostly degraded in place
+    (10-28%); almost none are re-routed (0-1.3%).
   - DiT early: mostly unchanged (59% and 66%), with 21% re-routed on both seed sets.
   - DiT mid and late: 27-35% and 29% of images are damaged.
   - DiT mid (`incep_cos` 0.305 / 0.326, validity 0.753 / 0.703) and VAR scale 2 sit in the re-routed
