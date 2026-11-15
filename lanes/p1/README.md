@@ -535,12 +535,12 @@ Dashed lines mark n_k/2; the solid line marks the end of the latent band.*
   - The decoder band stays low in every arm: 0.01-0.36.
 - **Phase F (panels A, B) is harder to read.** The real tokens refill the coarse layout, so the pattern
   across scales is not monotonic:
-  - FRC at r = 1 stays at 0.83 or higher for every arm (lowest: 0.828, crystals scale 1).
+  - FRC at r = 1 stays at 0.82 or higher for every arm (lowest: 0.825, crystals scale 2).
   - The latent band is lowest in the middle of the ladder, not at the start: crystals 0.39
     [0.35, 0.43] at scale 5, dogs 0.48-0.50 at scales 3-5. It is higher at both ends, for example
     crystals 0.55 at scale 0 and 0.85 at scale 9.
   - The above-vs-below-n_k/2 split holds here too for scales 1-8 (crystal scale 5: 0.78 at r ≤ 3,
-    0.15 at r = 4-8; dog scale 3: 0.82 vs 0.39). Decoder band: 0.05-0.37 on dogs, 0.05-0.32 on
+    0.15 at r = 4-8; dog scale 3: 0.82 vs 0.39). Decoder band: 0.045-0.37 on dogs, 0.05-0.32 on
     crystals.
 - **Against the real image:** the reference already has latent-band FRC 0.44 (crystals) and 0.65
   (dogs), and decoder-band FRC 0.02 and 0.06. Removing a scale lowers the latent band most at scales
