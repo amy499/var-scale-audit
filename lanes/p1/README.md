@@ -26,9 +26,11 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `make_dog64.py` | Phase F: copies 64 VAR baseline PNGs (all 7 classes) to a folder outside the repo, with `dog64_list.csv` |
 | `jobs/transfer_var.pbs` | Phase F: VAR scale removal on real images, one dataset per job, with codec and hook checks |
 | `transfer_summary.py` | Phase F: `pair` (per-arm change vs the reference, run in the job) and `summary` (CSV + Figure 1d) |
+| `jobs/transfer_dit.pbs` | Phase F (DiT, exploratory): DiT step skipping on real images from a t666 start, one dataset per job, with codec and hook checks |
+| `transfer_dit_summary.py` | Phase F (DiT, exploratory): CSV + Figure 1g from the two `transfer_dit.pbs` jobs (reuses `transfer_summary.py`) |
 | `frc.py` | Fourier Ring Correlation of each removal arm vs its reference / baseline / the real image, by frequency (Figure 1e) |
 | `fidelity.py` | P3's fidelity axis (`incep_cos`) and two-axis cells for every ImageNet removal arm, seed sets 1 and 2 (Figure 1f) |
-| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png`; FRC adds `frc.csv`, `frc_bands.csv`, `fig1e_frc.png`; fidelity adds `fidelity.csv`, `fig1f_fidelity.png` |
+| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png` (DiT, once run: `transfer_dit.csv`, `fig1g_transfer_dit.png`); FRC adds `frc.csv`, `frc_bands.csv`, `fig1e_frc.png`; fidelity adds `fidelity.csv`, `fig1f_fidelity.png` |
 
 ## What "removal" means
 
@@ -472,6 +474,101 @@ the real image). 64 images per dataset, 95% bootstrap CIs (B paired).*
   changes, not absolute PSNR.
 - `psnr_vs_ref` is capped at 99 dB for an image identical to the reference; `n_identical` in the CSV
   counts these.
+
+## Phase F (DiT, exploratory)
+
+**Question.** Does skipping a band of DiT steps do the same thing to a real image as to DiT's own
+generations? This is the DiT counterpart of the VAR Phase F above. It is exploratory: the start it needs
+is one P2 found unreliable for real images (see *Expected* below). **Not run yet; no results.**
+
+**Design** (`jobs/transfer_dit.pbs`, structured like `transfer_var.pbs`):
+- **Model settings:** DiT-XL/2, cfg 1 (`lanes/p2/jobs/dit_cfg1.yaml`, so guidance does not pull towards the
+  class), every row conditioned on class 0, as P1's VAR Phase F.
+- **Start:** each real image's VAE latent, noised to the timestep of DiT step 83 and denoised from there
+  (`lanes/p2/transfer.py:real_x`, `P2_REAL_STAGE`). Steps 0-82 still run, and their result is replaced.
+  - The timestep is not hard-coded. The job first generates one clean image (class 0, seed 0, no hooks,
+    same config) and reads it from that run's `run.json` stages table. It should be t666.
+- **Arms** (equal cuts, 83 steps each, as the ImageNet DiT bands):
+  - `reference`: no skip.
+  - `skip_mid`: steps 84-166 (t662-t333).
+  - `skip_late`: steps 167-249 (t329-t0).
+  - Steps become timesteps with `gateb.pbs`'s `TO_TIMESTEPS` (copied into the job) and are skipped with
+    `--skip-timesteps`. The skipped steps still draw their noise, so every arm stays paired with the
+    reference.
+  - The job stops if any skipped timestep is ≥ the start timestep.
+- **Why start at t666.** The ImageNet DiT bands are early (0-82), mid (84-166) and late (167-249). A start
+  at step 83 is the latest one that keeps both the mid and the late band after the start, at full size.
+  The early band is lost: it would come before the start.
+- **Checks per dataset, before the arms:**
+  - **(a) Codec:** `transfer recon --model dit`, the DiT VAE's reconstruction. It is recorded, with no
+    threshold. P2 got 29.68 dB on its crystals.
+  - **(b) Hooks:** `skip_mid` runs first. Its `run.json` must list `p2_real_x_t<start>` and the 83 skipped
+    timesteps, and the reference's must list `real_x` with no skip. Every image must differ from the
+    reference (`tensor_sha256`), with the same random draws (`generator_state_sha256`). Otherwise the job
+    stops and exits 1.
+  - Both checks were tested on the laptop before submission. On job 25893213's DiT `run.json`,
+    `TO_TIMESTEPS` gives t666, t662-t333 and t329-t0. Check (b) passes on run.jsons copied from that job and
+    fails when the hook or the skip is missing.
+- **Scores per image,** as the VAR version:
+  - PSNR to the real image and `hf_ratio` (`transfer score`);
+  - PSNR and MAD vs the reference output (`transfer_summary.py pair`).
+- **Raw tensors:** each run's `*.pt` are deleted once it is scored, as `transfer_var.pbs`. Set `KEEP_RAW=1`
+  to keep them.
+
+**Expected: mostly DiT's own generation, not the crystals.** P2 capped its DiT starts at t197 because from
+t297 the class prior replaces the crystals (`lanes/p2/results/phasef/README.md`, `../phasef_pilot/`). Even at
+t197, some images grow fish-like blobs. At t666 the latent is almost all noise: DiT's linear schedule keeps
+`alpha_bar` 0.011 there, about 1% of the signal variance (signal scale 0.10), against 0.66 at t197 and 0.40
+at t297. So the reference will look much more like a class-0 DiT sample than
+like the real image.
+- **Read the arms against the reference, not the real image.** MAD and PSNR vs the reference say what
+  skipping a band does to DiT's own generation, here seeded by a little of the real image's layout.
+- **PSNR to the real image** will be low for every run. The drop between arms is still paired, but it says
+  little about the crystals.
+- **Crystals vs dogs** differ only in the image whose coarse layout seeds the start. Any gap between them is
+  that layout's effect, not a measure of transfer.
+
+**Submit** (from the repo root on NSCC; use `$HOME`, not `~`, inside `-v`):
+
+```bash
+qsub -v REAL_DIR=$HOME/data_crystal_64_p1,DATASET=crystal lanes/p1/jobs/transfer_dit.pbs
+qsub -v REAL_DIR=$HOME/data_dog64_p1,DATASET=dog lanes/p1/jobs/transfer_dit.pbs
+python -m lanes.p1.transfer_dit_summary --crystal <JOB> --dog <JOB>   # laptop, after copying both jobs
+```
+
+**Runtime: about 5-7 min per job, plus start-up.** This is scaled from P1's DiT runs: 437 s to sample 224
+images at cfg 1.5, where CFG doubles the batch; model load 13-23 s.
+- Codec check: about 0.5 min.
+- One clean image for the stages table: about 0.5 min, mostly model load.
+- `reference`, 250 steps × 64 images at cfg 1: about 1-1.5 min.
+- `skip_mid` and `skip_late`, 167 model steps each: about 1 min each.
+- Scoring and pairing: about 10 s per run.
+
+Walltime is 1 h.
+
+**Outputs.** Each job writes `outputs/p1/<JOBID>/`:
+- `dataset.txt`, with the start step and timestep and the arms' step ranges;
+- `manifest.csv`, `recon/`, `schedule/` and `reference/`;
+- `skip_mid/` and `skip_late/`, each with PNGs, `run.json` and `transfer.csv`, plus `vs_reference.csv`;
+- `steps.tsv`, and `summary.txt` with check (b), per-run means and a `RESULT:` line.
+
+`transfer_dit_summary.py` writes:
+- **`results/transfer_dit.csv`:** one row per dataset and run, with the same columns and CIs as
+  `transfer_var.csv`, plus the start timestep, the step range and the first and last skipped timestep.
+- **`results/fig1g_transfer_dit.png`:** A, MAD vs the reference; B, PSNR drop to the real image. Each panel
+  shows `skip_mid` and `skip_late` for crystals vs dogs, with 95% CI bars.
+- It refuses to overwrite existing outputs.
+
+**Limits:**
+- **One start, so no early band.** Skipping early steps would need an earlier start, which the real image
+  would influence even less.
+- **One class (0) and cfg 1.** P2 found class 0 and class 973 within 0.05 dB at t197; at t666 the class
+  should matter more, and that is not tested here.
+- **The step before a skipped window is merged.** For `skip_mid` that is step 83 itself (`docs/hook_interface.md`
+  §11b): the real latent at t666 goes straight to t329 in one step. So `skip_mid` also removes all
+  denoising between the start and the late band.
+- **Images and model.** 64 images per dataset, DiT-XL/2 256 only, and PSNR/MAD only (no FRC or
+  `incep_cos` for this arm yet).
 
 ## FRC: which frequencies a removed scale changes
 

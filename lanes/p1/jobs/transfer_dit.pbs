@@ -1,0 +1,256 @@
+#!/bin/bash
+#PBS -N p1_transfer_dit
+#PBS -P personal-gura0001
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o outputs/p1/pbs/
+# P1 Phase F, DiT version (exploratory; lanes/p1/README.md "Phase F (DiT, exploratory)"). One dataset per
+# job, structured like jobs/transfer_var.pbs. DiT-XL/2, cfg 1 (lanes/p2/jobs/dit_cfg1.yaml), every row class 0.
+# Start: the real image's VAE latent noised to the timestep of DiT step START_STEP (default 83, the first step
+# of the mid band; 0 = first of 250) by lanes/p2/transfer.py:real_x (P2_REAL_STAGE). The start timestep is
+# read from a clean run's run.json stages table, not hard-coded. Arms (equal cuts, 83 steps each), skipped
+# with --skip-timesteps (noise still drawn, so every arm stays paired with the reference):
+#   reference   no skip
+#   skip_mid    steps 84-166      skip_late   steps 167-249
+# Step ranges -> timesteps with gateb.pbs's TO_TIMESTEPS; the job fails if a skipped timestep is >= the start.
+# Submit from the repo root (mkdir -p outputs/p1/pbs first); use $HOME, not ~, in -v:
+#     qsub -v REAL_DIR=$HOME/data_crystal_64_p1,DATASET=crystal lanes/p1/jobs/transfer_dit.pbs
+#     qsub -v REAL_DIR=$HOME/data_dog64_p1,DATASET=dog lanes/p1/jobs/transfer_dit.pbs
+# Order, all in outputs/p1/<JOBID>/:
+#   manifest   one row per image in REAL_DIR (sorted by name; non-image files such as sources.csv ignored)
+#   recon      (a) codec check: the DiT VAE's reconstruction (transfer recon --model dit); recorded, no threshold
+#   schedule   one clean image (class 0, seed 0, no hooks, same config): its run.json stages table gives the
+#              start timestep and the skipped timesteps
+#   reference  real latent noised to the start timestep, denoised over every later step
+#   skip_mid   first arm, then (b): its run.json lists real_x and the skip, the reference's lists real_x and no
+#              skip, every image differs from the reference (tensor_sha256) with the same random draws
+#              (generator_state_sha256). Otherwise exit 1.
+#   skip_late
+# Each run: generate, score (lanes.p2.transfer score: PSNR to the real image, hf_ratio), arms also pair
+# (lanes.p1.transfer_summary pair: PSNR and MAD vs the reference output), then its *.pt are deleted unless
+# KEEP_RAW=1 (default 0: deleted, as jobs/transfer_var.pbs). Exits 1 (after writing summary.txt) if any step failed.
+set -uo pipefail
+[[ -n "${PBS_JOBID:-}" ]] || { echo "submit with qsub; no GPU work on the login node" >&2; exit 1; }
+cd "$PBS_O_WORKDIR"
+[[ -f runner/generate.py ]] || { echo "submit from the repo root" >&2; exit 1; }
+[[ -d "${REAL_DIR:-}" ]] || { echo "set REAL_DIR to a folder of images (qsub -v REAL_DIR=...,DATASET=...)" >&2; exit 1; }
+[[ "${DATASET:-}" == crystal || "${DATASET:-}" == dog ]] || { echo "set DATASET=crystal or DATASET=dog" >&2; exit 1; }
+
+REAL_DIR="$(realpath "$REAL_DIR")"
+CONFIG=lanes/p2/jobs/dit_cfg1.yaml
+START_STEP=83                        # DiT step whose timestep_in is the start (P2_REAL_STAGE)
+ARMS=("skip_mid:84-166" "skip_late:167-249")
+CUT=83                               # steps per arm (equal-cuts rule, as gateb.pbs DIT_CUT)
+CLASS_ID=0                           # as P1's VAR Phase F: every row conditioned on class 0, both datasets
+KEEP_RAW="${KEEP_RAW:-0}"            # 1: keep each run's raw *.pt
+BATCH=16
+JOB="${PBS_JOBID%%.*}"
+OUT="outputs/p1/$JOB"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+
+set +u
+module load miniforge3
+module load git/2.39.2
+eval "$(conda shell.bash hook)"
+conda activate var-dit
+set -u
+export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 P2_REAL_DIR="$REAL_DIR" P2_REAL_MANIFEST="$OUT/manifest.csv"
+FAILED=0
+RUNS=()   # in run order, for the summary
+
+: > "$OUT/steps.tsv"
+step() {   # step NAME CMD...: run, log exit code + duration
+    local name="$1"; shift
+    echo; echo "===== [$name] $*"
+    local t0=$SECONDS
+    "$@"
+    local rc=$?
+    printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >> "$OUT/steps.tsv"
+    echo "===== [$name] exit=$rc ($((SECONDS - t0))s)"
+    return $rc
+}
+step_field() {   # step_field NAME COLUMN (2 = exit code, 3 = seconds)
+    awk -F'\t' -v n="$1" -v c="$2" '$1 == n { v = $c } END { print (v == "" ? "-" : v) }' "$OUT/steps.tsv"
+}
+
+echo "job=$PBS_JOBID host=$(hostname) date=$(date -Is)"
+nvidia-smi > "$OUT/nvidia-smi.txt" 2>&1
+N_IMAGES="$(python -c "import sys; from lanes.p2.transfer import images; print(len(images(sys.argv[1])))" "$REAL_DIR")" \
+    || { echo "FAILED: cannot list images in $REAL_DIR"; exit 1; }
+(( N_IMAGES % BATCH == 0 )) || { echo "FAILED: $N_IMAGES images in $REAL_DIR, not a multiple of $BATCH"; exit 1; }
+
+# DiT step indices A..B -> original timesteps, from a clean run's run.json stages table (copy of gateb.pbs).
+read -r -d '' TO_TIMESTEPS <<'EOF'
+import json, sys
+path, a, b, cut = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+run = json.load(open(path))
+if run.get("skip_timesteps"):
+    sys.exit(f"ERROR: {path} is not a clean baseline (skip_timesteps {run['skip_timesteps']})")
+stages = run["stages"]
+by_step = {s["step"]: s["timestep_in"] for s in stages}
+table = {s["stage"] for s in stages}
+steps = list(range(a, b + 1))
+missing = [i for i in steps if i not in by_step]
+if missing:
+    sys.exit(f"ERROR: step indices {missing[:5]} are not in the stages table of {path} (steps {min(by_step)}..{max(by_step)})")
+ts = [by_step[i] for i in steps]
+absent = [t for t in ts if t not in table]
+if absent:
+    sys.exit(f"ERROR: converted timesteps {absent[:5]} are not in the stages table of {path}")
+if len(set(ts)) != cut:
+    sys.exit(f"ERROR: steps {a}-{b} give {len(set(ts))} timesteps, not {cut} (equal-cuts rule)")
+print(" ".join(map(str, ts)))
+EOF
+
+drop_pt() {   # drop_pt <run-dir>: delete its raw tensors, only inside this job's directory
+    local real out n
+    real="$(realpath -e "$1")" && out="$(realpath -e "$OUT")" || { echo "drop_pt: cannot resolve $1"; return 1; }
+    if [[ "$real" != "$out"/?* || ! -f "$real/run.json" ]]; then
+        echo "drop_pt: refusing to delete in $1 (not a run directory inside $OUT)"; return 1
+    fi
+    n=$(find "$real" -maxdepth 1 -type f -name '*.pt' | wc -l)
+    find "$real" -maxdepth 1 -type f -name '*.pt' -delete || return 1
+    echo "drop_pt: removed $n raw tensors from $1"
+}
+
+generate() {   # generate <run> [timestep ...]: real_x from START, skipping the given timesteps
+    local run="$1"; shift
+    local skip=()
+    (( $# )) && skip=(--skip-timesteps "$@")
+    P2_REAL_STAGE="$START" python -m runner.generate --config "$CONFIG" --manifest "$OUT/manifest.csv" \
+        --batch-size $BATCH --out-dir "$OUT/$run" --hook lanes/p2/transfer.py:real_x ${skip[@]+"${skip[@]}"}
+}
+
+run_one() {   # run_one <run> [timestep ...]: generate, score, pair (arms), drop raw tensors
+    local run="$1" dir="$OUT/$1"
+    RUNS+=("$run")
+    step "$run:generate" generate "$@" || return 1
+    step "$run:score" python -m lanes.p2.transfer score "$dir" --real-dir "$REAL_DIR" --manifest "$OUT/manifest.csv" \
+        || return 1
+    if [[ "$run" != reference ]]; then
+        step "$run:pair" python -m lanes.p1.transfer_summary pair "$dir" --reference "$OUT/reference" || return 1
+    fi
+    if [[ "$KEEP_RAW" != 1 ]]; then step "$run:drop_pt" drop_pt "$dir" || return 1; fi
+}
+
+# (b) on skip_mid: real_x and the skip recorded, the reference clean apart from real_x, every image changed,
+# same random draws as the reference.
+read -r -d '' CHECK_HOOKS <<'EOF'
+import json, sys
+ref, arm = (json.load(open(f"{d}/run.json")) for d in sys.argv[1:3])
+start, want_skip = int(sys.argv[3]), [int(t) for t in sys.argv[4].split()]
+real = f"p2_real_x_t{start}"
+errors = []
+for name, run, skip in (("reference", ref, []), ("skip_mid", arm, want_skip)):
+    hooks = [h["name"] for h in run["hooks"]]
+    if hooks != [real]:
+        errors.append(f"{name} run.json hooks {hooks}, expected [{real}]")
+    if list(run["skip_timesteps"]) != skip:
+        errors.append(f"{name} run.json skip_timesteps {run['skip_timesteps'][:3]}... ({len(run['skip_timesteps'])}), "
+                      f"expected {len(skip)}")
+    if start not in {s["timestep_in"] for s in run["stages"]}:
+        errors.append(f"{name}: start timestep {start} is not an executed step (real_x never fired)")
+rkey = {(r["class_id"], r["seed"]): r for r in ref["rows"]}
+akey = {(r["class_id"], r["seed"]): r for r in arm["rows"]}
+if set(rkey) != set(akey):
+    errors.append("the reference and skip_mid have different rows")
+else:
+    same = sum(rkey[k]["tensor_sha256"] == akey[k]["tensor_sha256"] for k in rkey)
+    paired = sum(rkey[k]["generator_state_sha256"] == akey[k]["generator_state_sha256"] for k in rkey)
+    if same:
+        errors.append(f"{same}/{len(rkey)} images identical to the reference: the skip did not change them")
+    if paired != len(rkey):
+        errors.append(f"only {paired}/{len(rkey)} rows have the reference's generator_state_sha256 (not paired)")
+print((f"PASS: hook {real} + {len(want_skip)} skipped timesteps ({want_skip[0]}..{want_skip[-1]}); "
+       f"{len(rkey)}/{len(rkey)} images differ from the reference, all paired")
+      if not errors else "FAIL: " + "; ".join(errors))
+sys.exit(1 if errors else 0)
+EOF
+
+# One summary line per run from its CSVs (as transfer_var.pbs).
+read -r -d '' RUN_LINE <<'EOF'
+import csv, math, sys
+from pathlib import Path
+d = Path(sys.argv[1])
+def mean(rows, k):
+    v = [float(r[k]) for r in rows if not math.isnan(float(r[k]))]
+    return f"{sum(v) / len(v):.3f}" if v else "-"
+t = d / ("recon.csv" if d.name == "recon" else "transfer.csv")
+rows = list(csv.DictReader(open(t))) if t.is_file() else []
+v = d / "vs_reference.csv"
+ref = list(csv.DictReader(open(v))) if v.is_file() else []
+print("\t".join([mean(rows, "psnr") if rows else "-", mean(rows, "hf_ratio") if rows else "-",
+                 mean(ref, "psnr_vs_ref") if ref else "-", mean(ref, "mad_vs_ref") if ref else "-"]))
+EOF
+
+START="not set" HOOK_RESULT="not run"
+declare -A TS=()   # arm -> skipped timesteps
+write_summary() {
+    {
+        echo "P1 PHASE F TRANSFER, DiT ($DATASET)  job $PBS_JOBID  $(date -Is)"
+        echo "code             $(git rev-parse --abbrev-ref HEAD) $(git log -1 --oneline)"
+        echo "real dir         $REAL_DIR ($N_IMAGES images)"
+        echo "manifest sha256  $(sha256sum "$OUT/manifest.csv" 2>/dev/null | cut -d' ' -f1)"
+        echo "design           start step $START_STEP = timestep $START (real_x), class $CLASS_ID, $CONFIG"
+        for a in "${ARMS[@]}"; do
+            local n="${a%%:*}" t="${TS[${a%%:*}]:-}"
+            echo "arm              $n: steps ${a#*:} = timesteps ${t:+${t%% *}..${t##* } ($(wc -w <<< "$t"))}"
+        done
+        echo "check (b)        $HOOK_RESULT"
+        echo
+        printf '%-10s %4s %5s %4s %4s %5s  %9s %8s %11s %10s\n' run gen score pair drop secs psnr_real hf_ratio psnr_vs_ref mad_vs_ref
+        for r in recon ${RUNS[@]+"${RUNS[@]}"}; do
+            local gen secs vals
+            if [[ "$r" == recon ]]; then gen="$(step_field recon 2)"; secs="$(step_field recon 3)"
+            else gen="$(step_field "$r:generate" 2)"; secs="$(step_field "$r:generate" 3)"; fi
+            IFS=$'\t' read -r -a vals < <(python -c "$RUN_LINE" "$OUT/$r")
+            printf '%-10s %4s %5s %4s %4s %5s  %9s %8s %11s %10s\n' "$r" "$gen" "$(step_field "$r:score" 2)" \
+                "$(step_field "$r:pair" 2)" "$(step_field "$r:drop_pt" 2)" "$secs" "${vals[@]}"
+        done
+        echo "(exit codes; - = not run. psnr_real / hf_ratio vs the real images; psnr_vs_ref / mad_vs_ref vs reference)"
+        echo "(recon: (a), the DiT VAE alone; no threshold, compare P2's 29.68 dB on its crystal_64)"
+        echo
+        if [[ "$FAILED" == 0 ]]; then echo "RESULT: OK"; else echo "RESULT: FAILED"; fi
+    } > "$OUT/summary.txt"
+    cat "$OUT/summary.txt"
+}
+finish() { write_summary; if [[ "$FAILED" == 0 ]]; then echo "P1 PHASE F DiT DONE"; else echo "P1 PHASE F DiT FAILED: see above"; fi; exit "$FAILED"; }
+
+step manifest python -m lanes.p2.transfer manifest "$REAL_DIR" --out "$OUT/manifest.csv" --class-id "$CLASS_ID" \
+    || { FAILED=1; finish; }
+step recon python -m lanes.p2.transfer recon "$REAL_DIR" --out "$OUT/recon" --model dit || { FAILED=1; finish; }
+
+# Stages table of a clean run with this config: one image, no hooks, no skip.
+mkdir -p "$OUT/schedule"
+step schedule python -m runner.generate --config "$CONFIG" --class-id "$CLASS_ID" --seed 0 --out "$OUT/schedule/run" \
+    || { FAILED=1; finish; }
+START="$(python -c "$TO_TIMESTEPS" "$OUT/schedule/run.json" "$START_STEP" "$START_STEP" 1)" \
+    || { echo "STOP: cannot read the timestep of step $START_STEP"; START="not set"; FAILED=1; finish; }
+for a in "${ARMS[@]}"; do
+    name="${a%%:*}" range="${a#*:}"
+    ts="$(python -c "$TO_TIMESTEPS" "$OUT/schedule/run.json" "${range%-*}" "${range#*-}" "$CUT")" \
+        || { echo "STOP: $name: steps $range could not be converted to $CUT timesteps"; FAILED=1; finish; }
+    for t in $ts; do
+        (( t < START )) || { echo "STOP: $name skips timestep $t >= start timestep $START"; FAILED=1; finish; }
+    done
+    TS[$name]="$ts"
+    echo "$name: steps $range = timesteps ${ts%% *}..${ts##* } (all < start $START)"
+done
+printf 'DATASET=%s\nREAL_DIR=%s\nN_IMAGES=%s\nSTART_STEP=%s\nSTART_TIMESTEP=%s\nCLASS_ID=%s\nCONFIG=%s\n' \
+    "$DATASET" "$REAL_DIR" "$N_IMAGES" "$START_STEP" "$START" "$CLASS_ID" "$CONFIG" > "$OUT/dataset.txt"
+for a in "${ARMS[@]}"; do printf '%s=%s\n' "${a%%:*}" "${a#*:}" >> "$OUT/dataset.txt"; done
+echo "dataset: $DATASET  real dir: $REAL_DIR ($N_IMAGES images)  start step $START_STEP = t$START  class $CLASS_ID  config $CONFIG"
+
+# Reference, then skip_mid and check (b) before skip_late.
+run_one reference || { FAILED=1; finish; }
+# shellcheck disable=SC2086
+run_one skip_mid ${TS[skip_mid]} || { FAILED=1; finish; }
+HOOK_RESULT="$(python -c "$CHECK_HOOKS" "$OUT/reference" "$OUT/skip_mid" "$START" "${TS[skip_mid]}")"
+[[ "$HOOK_RESULT" == PASS* ]] || { echo "STOP: check (b) failed: $HOOK_RESULT"; FAILED=1; finish; }
+echo "check (b): $HOOK_RESULT"
+# shellcheck disable=SC2086
+run_one skip_late ${TS[skip_late]} || { echo "FAILED: skip_late"; FAILED=1; }
+finish
