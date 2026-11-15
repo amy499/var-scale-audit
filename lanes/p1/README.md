@@ -27,7 +27,8 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `jobs/transfer_var.pbs` | Phase F: VAR scale removal on real images, one dataset per job, with codec and hook checks |
 | `transfer_summary.py` | Phase F: `pair` (per-arm change vs the reference, run in the job) and `summary` (CSV + Figure 1d) |
 | `frc.py` | Fourier Ring Correlation of each removal arm vs its reference / baseline / the real image, by frequency (Figure 1e) |
-| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png`; FRC adds `frc.csv`, `frc_bands.csv`, `fig1e_frc.png` |
+| `fidelity.py` | P3's fidelity axis (`incep_cos`) and two-axis cells for every ImageNet removal arm, seed sets 1 and 2 (Figure 1f) |
+| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png`; FRC adds `frc.csv`, `frc_bands.csv`, `fig1e_frc.png`; fidelity adds `fidelity.csv`, `fig1f_fidelity.png` |
 
 ## What "removal" means
 
@@ -547,6 +548,68 @@ Dashed lines mark n_k/2; the solid line marks the end of the latent band.*
   4-5 for crystals (0.33) and scales 3-5 for dogs (0.42-0.45). For crystals, removing scales 6-9
   leaves it within 0.02 of the reference. For dogs, removing scales 7-9 leaves it within 0.04; scale 6
   gives 0.54.
+
+## Fidelity (P3's incep_cos)
+
+**What it is.** P3's fidelity metric (`lanes/p3/p3_metrics.py`): per image, the cosine distance between
+the arm's and the baseline's Inception-v3 pool features. 0 means the same image, and higher means less
+like the baseline. It is read together with validity (`cls_prob` relative to the baseline) on P3's
+two-axis plane:
+
+| | validity ≥ 0.5 | validity < 0.5 |
+|---|---|---|
+| incep_cos ≤ 0.30 | unchanged | degraded in place |
+| incep_cos > 0.30 | re-routed (a different but valid image) | damaged |
+
+**Why.** FRC and pixel change say how far an output moved from the baseline, not whether it is still a
+valid image. The two axes together separate "re-routed" from "damaged".
+
+**Method** (`fidelity.py`, CPU, from existing outputs; nothing is written into the job folders):
+- It reuses P3's `fidelity_incep` and `classify`, and P1's `summarize.py` loaders.
+- Arms come from jobs 25893211, 25893212, 25893213, 25916920, 25916921 (seed set 1) and 26203723, 26203724,
+  26203725 (seed set 2). Each arm is compared with its own job's baseline, paired by (class_id, seed).
+- `incep_cos` is a mean over images with a 95% bootstrap CI (10000 resamples, seed 0, as `summarize.py`).
+- `validity_ratio` is the arm's mean `cls_prob` over the baseline's, with a CI from the same resamples.
+- `frac_*` is the share of images in each cell. It uses `classify(incep_cos, cls_prob / baseline cls_prob of
+  that image)` without KID, as `lanes/p2/analyze.py` does per image.
+- `outcome_run` is the whole arm's cell, using the means and the arm's KID. KID > 0.005 counts as low validity.
+- **The thresholds are P3's provisional values:** `FIDELITY_LOW` 0.30, `VALIDITY_LOW` 0.50, `KID_HIGH`
+  0.005. Each row of the CSV states this.
+
+**Sanity check** (printed on every run): each baseline against itself gives `incep_cos` of at most
+1.2e-07 for all 224 images, in all 8 jobs. That is 0 to float32 precision: the features are stored as
+float32.
+
+```bash
+python3 -B -m lanes.p1.fidelity     # ~20 s on the laptop; needs numpy, matplotlib
+```
+
+Outputs:
+- `results/fidelity.csv`: one row per removal arm, 41 rows.
+- `results/fig1f_fidelity.png`.
+
+![Figure 1f](results/fig1f_fidelity.png)
+
+*Figure 1f. Validity vs fidelity per removal arm, seed set 1 (left) and seed set 2 (right), with 95%
+bootstrap CIs. Dashed lines are P3's provisional thresholds. The VAR window and group points are named in
+`fidelity.csv`.*
+
+**Observations** (`results/fidelity.csv`):
+- **Group removals are damage, not re-routing.**
+  - {0,1,2} and {3,4,5} put 100% of images in "damaged" on seed set 1 and 99.6% on seed set 2.
+  - {7,8,9} puts 94.2% and 95.5% there.
+  - {2,3} puts 99.1% there.
+- **Scales 0 and 1 mostly stay close to the baseline.**
+  - Mean `incep_cos` is 0.236-0.256, below 0.30, and validity is 0.97-1.04.
+  - Per image, 68-77% are unchanged, 14-20% re-routed and 7-9% damaged.
+  - Scale 3, by contrast, puts 53% (seed 1) and 57% (seed 2) of images in "damaged".
+- **The late single scales and DiT differ in which cell they move images to.**
+  - Late VAR scales: scales 5, 7, 8 and 9 have the lowest mean `incep_cos` (0.088-0.159). Images that leave
+    "unchanged" go mostly to "degraded in place" (10-28%), not to "re-routed" (0-1.3%).
+  - DiT early: mostly unchanged (59% and 66%), with 21% re-routed on both seed sets.
+  - DiT mid and late: 27-35% and 29% of images are damaged.
+  - DiT mid (`incep_cos` 0.305 / 0.326, validity 0.753 / 0.703) and VAR scale 2 sit in the re-routed
+    quadrant by their means. Their KID (> 0.005) makes their `outcome_run` "damaged".
 
 ## How to run
 
