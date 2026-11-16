@@ -30,7 +30,7 @@ P2's schema (`lanes/p2/schema.py`, `--lane p1`).
 | `transfer_dit_summary.py` | Phase F (DiT, exploratory): CSV + Figure 1g from the two `transfer_dit.pbs` jobs (reuses `transfer_summary.py`) |
 | `frc.py` | Fourier Ring Correlation of each removal arm vs its reference / baseline / the real image, by frequency (Figure 1e) |
 | `fidelity.py` | P3's fidelity axis (`incep_cos`) and two-axis cells for every ImageNet removal arm, seed sets 1 and 2 (Figure 1f) |
-| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png` (DiT, once run: `transfer_dit.csv`, `fig1g_transfer_dit.png`); FRC adds `frc.csv`, `frc_bands.csv`, `fig1e_frc.png`; fidelity adds `fidelity.csv`, `fig1f_fidelity.png` |
+| `results/` | `results_sweep.csv`, `ranking.csv`, `compare_dit.csv`, `heatmap_by_class.csv`, `seed2_results.csv`, `seed_compare.csv`, `fig1.png`, `fig1b_failures.png`, `fig1c_heatmap.png` (all quoted below); Phase F adds `transfer_var.csv`, `fig1d_transfer.png`; Phase F DiT adds `transfer_dit.csv`, `fig1g_transfer_dit.png`; FRC adds `frc.csv`, `frc_bands.csv`, `fig1e_frc.png`; fidelity adds `fidelity.csv`, `fig1f_fidelity.png` |
 
 ## What "removal" means
 
@@ -497,9 +497,10 @@ is one P2 found unreliable for real images (see *Expected* below). Jobs 26265701
     `--skip-timesteps`. The skipped steps still draw their noise, so every arm stays paired with the
     reference.
   - The job stops if any skipped timestep is ≥ the start timestep.
-- **Why start at t666.** The ImageNet DiT bands are early (0-82), mid (84-166) and late (167-249). A start
+- **Why start at t666.** The ImageNet DiT bands are early (1-83), mid (84-166) and late (167-249). A start
   at step 83 is the latest one that keeps both the mid and the late band after the start, at full size.
-  The early band is lost: it would come before the start.
+  The early band cannot be tested: it ends at the start step (83), where the real latent is put in, so
+  none of its steps can be skipped.
 - **Checks per dataset, before the arms:**
   - **(a) Codec:** `transfer recon --model dit`, the DiT VAE's reconstruction. It is recorded, with no
     threshold. P2 got 29.68 dB on its crystals.
@@ -797,7 +798,7 @@ qsub -v SETTINGS=lanes/p1/jobs/window3_var.env lanes/p1/jobs/gateb.pbs   # VAR w
 tail -f outputs/p1/<JOBID>/job.log             # ends with "P1 DONE: all runs recorded and paired"
 ```
 
-The project (`personal-gura0001`) is in the job header; override it with `qsub -P <id>`. Per model the
+Set your NSCC project id in the job header (`#PBS -P`) or override it with `qsub -P <id>`. Per model the
 job runs the baseline, then each arm in `VAR_ARMS` / `DIT_ARMS`; after each run: `schema record`
 (pairing check), `analyze images` (not for the baseline) and `quality`; at the end `schema collect`
 into `outputs/p1/<JOBID>/tables/`. Each step's exit code and duration go to `steps.tsv`.
